@@ -1,0 +1,17 @@
+node_modules
+*.log
+.env
+.env.*
+!.env.example
+dist
+.DS_Store
+
+# Local IDE/agent settings — never commit
+.claude/
+.vscode/
+.idea/
+
+# Never commit real credentials or tokens
+credentials.json
+tokens.json
+.config/
