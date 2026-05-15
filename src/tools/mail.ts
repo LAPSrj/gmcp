@@ -1,5 +1,8 @@
 import { z } from "zod";
+import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { googleRequest, googleList, GoogleError } from "../google/client.ts";
 import {
@@ -825,6 +828,85 @@ export function registerMailTools(server: McpServer): void {
       }
     },
   );
+
+  // ----- LISTEN INSTRUCTIONS (Monitor handoff) -----
+
+  server.tool(
+    "mail_listen_instructions",
+    "Returns the exact Monitor() invocation needed to start a persistent INBOX listener (long-poll over Gmail's history API). The listener path is resolved from this server's own install location, so the caller does not need to know where the package lives. Pass the returned `monitor` object directly to Claude Code's Monitor tool. Each stdout line is one JSON message event (same compact shape as `mail_list`). Pass `thread_id` to filter server-side to one thread — that's the 'watch for replies to a specific email' pattern (look up the email's thread_id via `mail_get` first). For a full firehose, omit `thread_id` and the caller can post-filter however it likes.",
+    {
+      thread_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional Gmail threadId. When set, the listener only emits messages whose threadId matches — use this to watch for replies to one specific email. Filter is applied server-side before the metadata fetch, so non-matching arrivals are nearly free.",
+        ),
+      poll_interval_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(60)
+        .optional()
+        .describe("How often the listener calls history.list. Default 10."),
+    },
+    async ({ thread_id, poll_interval_seconds }) => {
+      // src/tools/mail.ts → ../../scripts/gmail-listen.ts
+      const here = dirname(fileURLToPath(import.meta.url));
+      const listenerPath = resolve(here, "..", "..", "scripts", "gmail-listen.ts");
+      const listenerExists = existsSync(listenerPath);
+
+      // Monitor strips env from spawned children; bake the gmail-mcp config
+      // env vars inline so the listener can reach the same OAuth client +
+      // token cache as the server. Tokens themselves stay on disk
+      // (~/.config/gmail-mcp/tokens-<profile>.json, 0600) — only the path
+      // hints land on the command line.
+      const envParts: string[] = [];
+      const credsFile = process.env.GMAIL_MCP_CREDENTIALS_FILE;
+      const profile = process.env.GMAIL_MCP_PROFILE;
+      const tokenPath = process.env.GMAIL_MCP_TOKEN_PATH;
+      if (credsFile) envParts.push(`GMAIL_MCP_CREDENTIALS_FILE=${shellQuote(credsFile)}`);
+      if (profile) envParts.push(`GMAIL_MCP_PROFILE=${shellQuote(profile)}`);
+      if (tokenPath) envParts.push(`GMAIL_MCP_TOKEN_PATH=${shellQuote(tokenPath)}`);
+
+      const flags: string[] = [];
+      if (thread_id) flags.push(`--thread-id=${shellQuote(thread_id)}`);
+      if (poll_interval_seconds) flags.push(`--poll=${poll_interval_seconds}`);
+
+      const command = [
+        ...envParts,
+        "bun",
+        shellQuote(listenerPath),
+        ...flags,
+      ].join(" ");
+
+      return ok({
+        monitor: {
+          command,
+          description: thread_id ? `Gmail thread ${thread_id}` : "Gmail inbox",
+          persistent: true,
+          timeout_ms: 3600000,
+        },
+        listener_path: listenerPath,
+        listener_exists: listenerExists,
+        profile: profile ?? null,
+        notes: [
+          "Each stdout line is one JSON message event with the same shape as `mail_list` entries (id, thread_id, subject, from, to, cc, snippet, labels, history_id, …).",
+          "Stderr is diagnostics — connection banner, reseed events, transient errors.",
+          "Cursor is delta-accurate via Gmail's history API. On reconnect within ~7 days no messages are missed; if the cursor goes stale (404) the listener reseeds and logs a `reseeded` warning to stderr — a gap may have been missed in that window.",
+          thread_id
+            ? `Filtering server-side to thread_id=${thread_id}. Other arrivals are silently dropped before the metadata fetch.`
+            : "Firehose mode (no thread filter). To watch for replies to a specific email instead, call this tool again with `thread_id` set to that email's threadId (look it up via `mail_get`).",
+          "Env vars (GMAIL_MCP_CREDENTIALS_FILE / GMAIL_MCP_PROFILE / GMAIL_MCP_TOKEN_PATH) are baked into the command line because Monitor spawns children with a stripped env. Tokens themselves stay on disk in ~/.config/gmail-mcp/, not on the command line.",
+        ],
+      });
+    },
+  );
+}
+
+function shellQuote(s: string): string {
+  // Single-quote everything; escape any embedded single quote by closing,
+  // inserting an escaped quote, and reopening. Safe for arbitrary paths.
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
 // ---------- helpers used by reply tools ----------

@@ -8,7 +8,7 @@ Modelled on `outlook-mcp`; tool names and argument shapes match wherever the und
 
 **Account (2 tools):** `who_am_i`, `mailbox_get_settings` (timezone, auto-responder).
 
-**Mail (22 tools):** `mail_list`, `mail_search` (Gmail `q` syntax), `mail_get`, `mail_get_attachment`, `mail_list_labels`, `mail_create_label`, `mail_apply_labels`, `mail_get_thread`, `mail_list_threads`, `mail_send`, `mail_create_draft`, `mail_update_draft`, `mail_send_draft`, `mail_reply`, `mail_reply_all`, `mail_forward`, `mail_move`, `mail_mark_read`, `mail_mark_unread`, `mail_flag`, `mail_delete`, `mail_listen_inbox` (long-poll via history API).
+**Mail (23 tools):** `mail_list`, `mail_search` (Gmail `q` syntax), `mail_get`, `mail_get_attachment`, `mail_list_labels`, `mail_create_label`, `mail_apply_labels`, `mail_get_thread`, `mail_list_threads`, `mail_send`, `mail_create_draft`, `mail_update_draft`, `mail_send_draft`, `mail_reply`, `mail_reply_all`, `mail_forward`, `mail_move`, `mail_mark_read`, `mail_mark_unread`, `mail_flag`, `mail_delete`, `mail_listen_inbox` (long-poll via history API), `mail_listen_instructions` (returns a Monitor() invocation for a persistent NDJSON event stream — firehose, or filtered to one thread for "watch replies to this email").
 
 **Calendar (7 tools):** `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `calendar_list_event_instances`, `calendar_find_free_slots` (multi-calendar via `freeBusy`), `calendar_create_event` (with Google Meet auto-provision), `calendar_update_event`, `calendar_delete_event`, `calendar_respond`.
 
