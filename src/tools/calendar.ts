@@ -401,7 +401,12 @@ export function registerCalendarTools(server: McpServer): void {
       timezone: z.string().default("UTC").describe("IANA timezone (e.g. America/Sao_Paulo). Windows TZ names are not accepted."),
       body: z.string().optional(),
       body_format: z.enum(["text", "html"]).default("text"),
-      location: z.string().optional(),
+      location: z
+        .string()
+        .optional()
+        .describe(
+          "Free-form text only — Google Calendar has no structured address or coordinates field (unlike outlook-mcp). For a real venue, pass ONE well-formed string with the place name + full street address so clients can geocode a map pin, e.g. \"Victory Barber & Brand Gastown, 77 East Cordova St, Vancouver, BC V6A 1K3, Canada\". If you have lat/long, there is nowhere to put it in Google Calendar — fold it into the address text or omit it.",
+        ),
       attendees: z.array(attendeeSchema).optional(),
       is_online_meeting: z.boolean().default(false),
       online_meeting_provider: z
@@ -517,7 +522,12 @@ export function registerCalendarTools(server: McpServer): void {
       timezone: z.string().optional(),
       body: z.string().optional(),
       body_format: z.enum(["text", "html"]).default("text"),
-      location: z.string().optional(),
+      location: z
+        .string()
+        .optional()
+        .describe(
+          "Free-form text only — Google Calendar has no structured address or coordinates field (unlike outlook-mcp). For a real venue, pass ONE well-formed string with the place name + full street address so clients can geocode a map pin, e.g. \"Victory Barber & Brand Gastown, 77 East Cordova St, Vancouver, BC V6A 1K3, Canada\". If you have lat/long, there is nowhere to put it in Google Calendar — fold it into the address text or omit it.",
+        ),
       attendees: z.array(attendeeSchema).optional(),
       reminder_minutes_before: z.number().int().min(0).max(40320).optional(),
       show_as: z
