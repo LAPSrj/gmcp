@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   attachmentSchema,
   materializeAttachments,
+  resolveReplyRecipients,
 } from "../src/tools/mail.ts";
 import { buildMimeMessage } from "../src/google/mime.ts";
 import { base64urlDecodeToBuffer } from "../src/tools/helpers.ts";
@@ -121,5 +122,173 @@ describe("materializeAttachments", () => {
   test("empty / undefined input returns []", async () => {
     expect(await materializeAttachments(undefined)).toEqual([]);
     expect(await materializeAttachments([])).toEqual([]);
+  });
+});
+
+describe("resolveReplyRecipients", () => {
+  const alice = { email: "alice@x.com", name: "Alice" };
+  const bob = { email: "bob@x.com", name: "Bob" };
+  const carol = { email: "carol@x.com", name: "Carol" };
+  const me = { email: "me@example.com", name: "Me" };
+
+  test("standard reply: To = sender; Cc empty", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [me],
+      cc: [bob],
+      me: me.email,
+      all: false,
+    });
+    expect(r.to).toEqual([alice]);
+    expect(r.cc).toEqual([]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("standard reply-all: To = sender; Cc = origTo+origCc minus self minus sender", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [me, bob],
+      cc: [carol],
+      me: me.email,
+      all: true,
+    });
+    expect(r.to).toEqual([alice]);
+    expect(r.cc).toEqual([bob, carol]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("SENT message (from == self), reply: To = origTo minus self", () => {
+    const r = resolveReplyRecipients({
+      from: me,
+      to: [alice, bob],
+      cc: [carol],
+      me: me.email,
+      all: false,
+    });
+    expect(r.to.map((x) => x.email).sort()).toEqual(["alice@x.com", "bob@x.com"]);
+    expect(r.cc).toEqual([]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("SENT message, reply-all: To = origTo minus self; Cc = origCc minus self", () => {
+    const r = resolveReplyRecipients({
+      from: me,
+      to: [alice, bob, me],
+      cc: [carol, me],
+      me: me.email,
+      all: true,
+    });
+    expect(r.to.map((x) => x.email).sort()).toEqual(["alice@x.com", "bob@x.com"]);
+    expect(r.cc.map((x) => x.email)).toEqual(["carol@x.com"]);
+    expect(r.warnings).toEqual([]);
+  });
+
+  test("SENT message with no other recipients falls back to self + warns", () => {
+    const r = resolveReplyRecipients({
+      from: me,
+      to: [me],
+      cc: [],
+      me: me.email,
+      all: false,
+    });
+    expect(r.to).toEqual([me]);
+    expect(r.warnings).toHaveLength(1);
+    expect(r.warnings[0]).toMatch(/your own address/);
+    expect(r.warnings[0]).toContain("me@example.com");
+  });
+
+  test("explicit to override wins over heuristic", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [me, bob],
+      cc: [carol],
+      me: me.email,
+      all: true,
+      override: { to: [{ email: "elsewhere@x.com" }] },
+    });
+    expect(r.to).toEqual([{ email: "elsewhere@x.com" }]);
+    expect(r.cc).toEqual([]);
+  });
+
+  test("explicit cc override wins (with empty to override) — heuristic skipped entirely", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [bob],
+      cc: [carol],
+      me: me.email,
+      all: true,
+      override: { cc: [{ email: "audit@x.com" }] },
+    });
+    expect(r.to).toEqual([]);
+    expect(r.cc).toEqual([{ email: "audit@x.com" }]);
+  });
+
+  test("override that resolves to self still warns", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [bob],
+      cc: [],
+      me: me.email,
+      all: false,
+      override: { to: [me] },
+    });
+    expect(r.to).toEqual([me]);
+    expect(r.warnings).toHaveLength(1);
+  });
+
+  test("dedupes by email (case-insensitive)", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [bob, { email: "BOB@x.com", name: "Bob (caps)" }],
+      cc: [carol, bob],
+      me: me.email,
+      all: true,
+    });
+    expect(r.to).toEqual([alice]);
+    expect(r.cc.map((x) => x.email.toLowerCase()).sort()).toEqual(["bob@x.com", "carol@x.com"]);
+  });
+
+  test("no `me` known (auth lookup failed): treats from as not-self; standard reply", () => {
+    const r = resolveReplyRecipients({
+      from: alice,
+      to: [bob],
+      cc: [],
+      me: null,
+      all: false,
+    });
+    expect(r.to).toEqual([alice]);
+    expect(r.warnings).toEqual([]);
+  });
+});
+
+describe("attachment on reply path (integration via materializeAttachments)", () => {
+  test("file_path attachment is materialized and round-trips byte-identical when fed into buildMimeMessage just like sendReply does", async () => {
+    // sendReply wraps materializeAttachments + buildMimeMessage; the
+    // network-touching parts (googleRequest) aren't unit-testable without
+    // mocks. This test exercises the data path sendReply uses for
+    // attachments.
+    const original = Buffer.from([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x7f]);
+    await withTmpFile("reply-fixture.bin", original, async (path) => {
+      const materialized = await materializeAttachments([
+        { file_path: path, content_type: "application/octet-stream" },
+      ]);
+      const { raw } = buildMimeMessage({
+        to: [{ email: "other@x.com" }],
+        subject: "Re: hi",
+        body: "see attached",
+        bodyFormat: "text",
+        inReplyTo: "<orig-1@example.com>",
+        references: "<orig-1@example.com>",
+        attachments: materialized,
+      });
+      const decoded = base64urlDecodeToBuffer(raw).toString("binary");
+      const m = decoded.match(
+        /Content-Disposition: attachment; filename="reply-fixture\.bin"\r\n\r\n([A-Za-z0-9+/=\r\n]+?)(?:\r\n--)/,
+      );
+      expect(m).not.toBeNull();
+      const attB64 = m![1]!.replace(/\r\n/g, "");
+      expect(Buffer.from(attB64, "base64").equals(original)).toBe(true);
+      expect(decoded).toContain("In-Reply-To: <orig-1@example.com>");
+    });
   });
 });

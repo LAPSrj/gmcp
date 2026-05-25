@@ -615,43 +615,65 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_reply",
-    "Reply to a message. Provide `body` for a fully custom body, or `comment` for a note above the quoted original. Threading headers (In-Reply-To, References, threadId) are set automatically.",
+    "Reply to a message. Provide `body` for a fully custom body, or `comment` for a note above the quoted original. Threading headers (In-Reply-To, References, threadId) are set automatically. If the message being replied to was sent by YOU (e.g. continuing a thread you started), recipients are resolved from the original To/Cc minus self, not from the original From. Pass explicit `to`/`cc`/`bcc` to override the heuristic. The response includes a `warnings` array — non-empty when the resolver lands on a suspicious recipient (e.g. yourself).",
     {
       id: z.string(),
       body: z.string().optional(),
       body_format: z.enum(["text", "html"]).default("text"),
       comment: z.string().optional(),
+      to: z.array(recipientSchema).optional().describe("Override the resolved To. When set, the heuristic is skipped."),
+      cc: z.array(recipientSchema).optional().describe("Override the resolved Cc. When set, the heuristic is skipped."),
+      bcc: z.array(recipientSchema).optional().describe("Bcc list (no heuristic — always honored as-is)."),
+      attachments: z.array(attachmentSchema).optional(),
     },
-    async ({ id, body, body_format, comment }) => {
-      const sentId = await sendReply({
+    async ({ id, body, body_format, comment, to, cc, bcc, attachments }) => {
+      const result = await sendReply({
         id,
         body,
         bodyFormat: body_format,
         comment,
         all: false,
+        override: { to, cc, bcc },
+        attachments,
       });
-      return ok({ sent: true, id: sentId.id, thread_id: sentId.threadId });
+      return ok({
+        sent: true,
+        id: result.id,
+        thread_id: result.threadId,
+        warnings: result.warnings,
+      });
     },
   );
 
   server.tool(
     "mail_reply_all",
-    "Reply-all to a message — preserves To/Cc of the original.",
+    "Reply-all to a message — preserves To/Cc of the original. If the message was sent by YOU, recipients are resolved from the original To/Cc minus self (so the reply goes to the other parties, not back to yourself). Pass explicit `to`/`cc`/`bcc` to override.",
     {
       id: z.string(),
       body: z.string().optional(),
       body_format: z.enum(["text", "html"]).default("text"),
       comment: z.string().optional(),
+      to: z.array(recipientSchema).optional().describe("Override the resolved To. When set, the heuristic is skipped."),
+      cc: z.array(recipientSchema).optional().describe("Override the resolved Cc. When set, the heuristic is skipped."),
+      bcc: z.array(recipientSchema).optional().describe("Bcc list (no heuristic — always honored as-is)."),
+      attachments: z.array(attachmentSchema).optional(),
     },
-    async ({ id, body, body_format, comment }) => {
-      const sentId = await sendReply({
+    async ({ id, body, body_format, comment, to, cc, bcc, attachments }) => {
+      const result = await sendReply({
         id,
         body,
         bodyFormat: body_format,
         comment,
         all: true,
+        override: { to, cc, bcc },
+        attachments,
       });
-      return ok({ sent: true, id: sentId.id, thread_id: sentId.threadId });
+      return ok({
+        sent: true,
+        id: result.id,
+        thread_id: result.threadId,
+        warnings: result.warnings,
+      });
     },
   );
 
@@ -662,8 +684,9 @@ export function registerMailTools(server: McpServer): void {
       id: z.string(),
       to: z.array(recipientSchema).min(1),
       comment: z.string().optional(),
+      attachments: z.array(attachmentSchema).optional(),
     },
-    async ({ id, to, comment }) => {
+    async ({ id, to, comment, attachments }) => {
       const original = await googleRequest<GmailMessage>({
         api: "gmail",
         path: `/users/me/messages/${encodeURIComponent(id)}`,
@@ -686,11 +709,13 @@ export function registerMailTools(server: McpServer): void {
         },
         mode: "forward",
       });
+      const materializedAtts = await materializeAttachments(attachments);
       const { raw } = buildMimeMessage({
         to,
         subject: fwdSubject,
         body: composed,
         bodyFormat: "text",
+        attachments: materializedAtts,
         // Forwards don't use In-Reply-To; they start their own thread.
       });
       const sent = await googleRequest<{ id: string; threadId: string }>({
@@ -1008,7 +1033,9 @@ async function sendReply(args: {
   bodyFormat: "text" | "html";
   comment: string | undefined;
   all: boolean;
-}): Promise<{ id: string; threadId: string }> {
+  override?: { to?: Recipient[]; cc?: Recipient[]; bcc?: Recipient[] };
+  attachments?: AttachmentInput[];
+}): Promise<{ id: string; threadId: string; warnings: string[] }> {
   const original = await googleRequest<GmailMessage>({
     api: "gmail",
     path: `/users/me/messages/${encodeURIComponent(args.id)}`,
@@ -1026,7 +1053,7 @@ async function sendReply(args: {
 
   const replySubject = /^re:/i.test(origSubject) ? origSubject : `Re: ${origSubject}`;
 
-  // Determine "me" for reply-all so we don't include ourselves in To/Cc.
+  // Determine "me" for SENT-detection and self-filtering.
   let me: string | null = null;
   try {
     const prof = await googleRequest<{ emailAddress?: string }>({
@@ -1038,23 +1065,14 @@ async function sendReply(args: {
     // best-effort
   }
 
-  const replyTo: Recipient[] = origFrom.email
-    ? [{ email: origFrom.email, ...(origFrom.name ? { name: origFrom.name } : {}) }]
-    : [];
-  let replyCc: Recipient[] = [];
-  if (args.all) {
-    const merged = [...origTo, ...origCc]
-      .filter((a) => a.email && a.email.toLowerCase() !== me && a.email.toLowerCase() !== origFrom.email?.toLowerCase())
-      .map((a) => ({ email: a.email!, ...(a.name ? { name: a.name } : {}) }));
-    // dedupe by email
-    const seen = new Set<string>();
-    replyCc = merged.filter((r) => {
-      const k = r.email.toLowerCase();
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
-  }
+  const resolved = resolveReplyRecipients({
+    from: origFrom,
+    to: origTo,
+    cc: origCc,
+    me,
+    all: args.all,
+    override: args.override,
+  });
 
   const references = origReferences
     ? `${origReferences} ${origMessageId ?? ""}`.trim()
@@ -1073,14 +1091,18 @@ async function sendReply(args: {
     mode: "reply",
   });
 
+  const materializedAtts = await materializeAttachments(args.attachments);
+
   const { raw } = buildMimeMessage({
-    to: replyTo,
-    cc: replyCc.length ? replyCc : undefined,
+    to: resolved.to,
+    cc: resolved.cc.length ? resolved.cc : undefined,
+    bcc: resolved.bcc && resolved.bcc.length ? resolved.bcc : undefined,
     subject: replySubject,
     body: composedBody,
     bodyFormat: args.bodyFormat,
     inReplyTo: origMessageId ?? undefined,
     references,
+    attachments: materializedAtts,
   });
 
   const sent = await googleRequest<{ id: string; threadId: string }>({
@@ -1089,7 +1111,111 @@ async function sendReply(args: {
     method: "POST",
     body: { raw, threadId: original.threadId },
   });
-  return sent;
+  return { id: sent.id, threadId: sent.threadId, warnings: resolved.warnings };
+}
+
+// Pure recipient-resolution helper for reply / reply-all. Exported for unit
+// testing.
+//
+// Heuristic: when the message being replied to was sent by the caller
+// (`from.email == me`), continue the thread *to the other party* — resolve
+// To from the original recipients minus self, not from the sender. Without
+// this, mail_reply on one of your own sent messages addresses the reply
+// back to yourself.
+//
+// Caller can short-circuit the heuristic by passing any of `override.to`,
+// `override.cc`, `override.bcc`. When set, the override list is used as-is
+// (overrides are not merged with heuristic results).
+//
+// Returns a `warnings` array; non-empty when the resolved To still includes
+// the caller's own address. Caller decides whether to surface, abort, etc.
+export function resolveReplyRecipients(args: {
+  from: { email: string | null; name: string | null };
+  to: { email: string | null; name: string | null }[];
+  cc: { email: string | null; name: string | null }[];
+  me: string | null;
+  all: boolean;
+  override?: { to?: Recipient[]; cc?: Recipient[]; bcc?: Recipient[] };
+}): { to: Recipient[]; cc: Recipient[]; bcc?: Recipient[]; warnings: string[] } {
+  const me = args.me?.toLowerCase() ?? null;
+  const warnings: string[] = [];
+
+  const dedupe = (list: Recipient[]): Recipient[] => {
+    const seen = new Set<string>();
+    return list.filter((r) => {
+      const k = r.email.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  };
+
+  const toRecipient = (a: { email: string | null; name: string | null }): Recipient | null =>
+    a.email ? { email: a.email, ...(a.name ? { name: a.name } : {}) } : null;
+
+  const notSelf = (r: Recipient): boolean => !me || r.email.toLowerCase() !== me;
+
+  const overrideUsed = Boolean(
+    args.override && (args.override.to || args.override.cc || args.override.bcc),
+  );
+
+  let to: Recipient[];
+  let cc: Recipient[];
+  let bcc: Recipient[] | undefined;
+
+  if (overrideUsed) {
+    to = dedupe(args.override!.to ?? []);
+    cc = dedupe(args.override!.cc ?? []);
+    bcc = args.override!.bcc ? dedupe(args.override!.bcc) : undefined;
+  } else {
+    const fromIsSelf = !!me && args.from.email?.toLowerCase() === me;
+    if (fromIsSelf) {
+      // Continue this thread to the other party.
+      const recipients = args.to
+        .map(toRecipient)
+        .filter((r): r is Recipient => r !== null)
+        .filter(notSelf);
+      to = dedupe(recipients);
+      if (args.all) {
+        const ccRecipients = args.cc
+          .map(toRecipient)
+          .filter((r): r is Recipient => r !== null)
+          .filter(notSelf);
+        cc = dedupe(ccRecipients);
+      } else {
+        cc = [];
+      }
+      // Sent-to-self-only: nothing left after filtering. Fall back to the
+      // sender (still self) so we don't produce an empty To.
+      if (to.length === 0) {
+        const fallback = toRecipient(args.from);
+        if (fallback) to = [fallback];
+      }
+    } else {
+      const replyTo = toRecipient(args.from);
+      to = replyTo ? [replyTo] : [];
+      if (args.all) {
+        const fromEmail = args.from.email?.toLowerCase() ?? null;
+        const merged = [...args.to, ...args.cc]
+          .map(toRecipient)
+          .filter((r): r is Recipient => r !== null)
+          .filter(notSelf)
+          .filter((r) => !fromEmail || r.email.toLowerCase() !== fromEmail);
+        cc = dedupe(merged);
+      } else {
+        cc = [];
+      }
+    }
+  }
+
+  if (me && to.some((r) => r.email.toLowerCase() === me)) {
+    const list = to.map((r) => r.email).join(", ");
+    warnings.push(
+      `reply will be sent to [${list}] — your own address; pass an explicit 'to' override to send elsewhere`,
+    );
+  }
+
+  return { to, cc, ...(bcc !== undefined ? { bcc } : {}), warnings };
 }
 
 function collectParticipants(msgs: GmailMessage[]): { email: string; name: string | null }[] {
