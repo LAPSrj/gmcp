@@ -8,11 +8,13 @@ import { buildRecurrenceLines, type Recurrence } from "../google/rrule.ts";
 
 // ---------- Schemas ----------
 
-const attendeeSchema = z.object({
-  email: z.string().email(),
-  name: z.string().optional(),
-  type: z.enum(["required", "optional", "resource"]).default("required"),
-});
+const attendeeSchema = z
+  .object({
+    email: z.string().email(),
+    name: z.string().optional(),
+    type: z.enum(["required", "optional", "resource"]).default("required"),
+  })
+  .strict();
 
 const dayOfWeek = z.enum([
   "sunday",
@@ -24,37 +26,45 @@ const dayOfWeek = z.enum([
   "saturday",
 ]);
 
-const recurrenceSchema = z.object({
-  pattern: z.object({
-    type: z.enum([
-      "daily",
-      "weekly",
-      "absoluteMonthly",
-      "relativeMonthly",
-      "absoluteYearly",
-      "relativeYearly",
-    ]),
-    interval: z.number().int().min(1).default(1),
-    days_of_week: z.array(dayOfWeek).optional(),
-    first_day_of_week: dayOfWeek.optional(),
-    day_of_month: z.number().int().min(1).max(31).optional(),
-    month: z.number().int().min(1).max(12).optional(),
-    index: z.enum(["first", "second", "third", "fourth", "last"]).optional(),
-  }),
-  range: z.object({
-    type: z.enum(["endDate", "noEnd", "numbered"]),
-    start_date: z.string().describe("ISO date YYYY-MM-DD (no time component)"),
-    end_date: z.string().optional(),
-    number_of_occurrences: z.number().int().min(1).optional(),
-    timezone: z.string().describe("IANA timezone for recurrence interpretation (e.g. America/Sao_Paulo). Windows TZ names are not accepted."),
-  }),
-});
+const recurrenceSchema = z
+  .object({
+    pattern: z
+      .object({
+        type: z.enum([
+          "daily",
+          "weekly",
+          "absoluteMonthly",
+          "relativeMonthly",
+          "absoluteYearly",
+          "relativeYearly",
+        ]),
+        interval: z.number().int().min(1).default(1),
+        days_of_week: z.array(dayOfWeek).optional(),
+        first_day_of_week: dayOfWeek.optional(),
+        day_of_month: z.number().int().min(1).max(31).optional(),
+        month: z.number().int().min(1).max(12).optional(),
+        index: z.enum(["first", "second", "third", "fourth", "last"]).optional(),
+      })
+      .strict(),
+    range: z
+      .object({
+        type: z.enum(["endDate", "noEnd", "numbered"]),
+        start_date: z.string().describe("ISO date YYYY-MM-DD (no time component)"),
+        end_date: z.string().optional(),
+        number_of_occurrences: z.number().int().min(1).optional(),
+        timezone: z.string().describe("IANA timezone for recurrence interpretation (e.g. America/Sao_Paulo). Windows TZ names are not accepted."),
+      })
+      .strict(),
+  })
+  .strict();
 
-const onlineMeetingSchema = z.object({
-  join_url: z.string().url(),
-  conference_id: z.string().optional(),
-  toll_number: z.string().optional(),
-});
+const onlineMeetingSchema = z
+  .object({
+    join_url: z.string().url(),
+    conference_id: z.string().optional(),
+    toll_number: z.string().optional(),
+  })
+  .strict();
 
 // ---------- Types from the API (the bits we use) ----------
 

@@ -34,10 +34,12 @@ import {
 
 // ---------- Shared schemas ----------
 
-const recipientSchema = z.object({
-  email: z.string().email(),
-  name: z.string().optional(),
-});
+const recipientSchema = z
+  .object({
+    email: z.string().email(),
+    name: z.string().optional(),
+  })
+  .strict();
 
 const attachmentSchema = z
   .object({
@@ -59,6 +61,10 @@ const attachmentSchema = z
         "Absolute path to a file on the MCP server's disk. The server reads and base64-encodes it server-side, so the bytes never enter the agent's context. Mutually exclusive with content_base64. Path must be absolute and free of '..' segments.",
       ),
   })
+  // .strict() must come BEFORE .refine() — .refine() returns ZodEffects (not
+  // ZodObject), and .strict() is a ZodObject method. Strict is preserved by
+  // the ZodEffects wrapper at parse time.
+  .strict()
   .refine((a) => Boolean(a.content_base64) !== Boolean(a.file_path), {
     message: "Provide exactly one of content_base64 or file_path.",
   })

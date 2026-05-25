@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { strictifyToolRegistration } from "../src/tools/helpers.ts";
+import { attachmentSchema } from "../src/tools/mail.ts";
 
 describe("strictifyToolRegistration", () => {
   test("registered tools reject unknown keys with the key named", async () => {
@@ -44,6 +45,39 @@ describe("strictifyToolRegistration", () => {
       output_path: "/tmp/file.bin",
     });
     expect(good.success).toBe(true);
+  });
+
+  test("nested attachmentSchema rejects typoed key like 'namee'", () => {
+    // Top-level inputSchema strict only catches top-level typos. Nested
+    // shared schemas (attachmentSchema, recipientSchema, calendar
+    // attendee/recurrence/online-meeting) must be .strict() themselves
+    // so a typo inside an attachment entry doesn't silently drop.
+    const parsed = attachmentSchema.safeParse({
+      namee: "foo.txt", // typo of `name`
+      content_base64: Buffer.from("hi").toString("base64"),
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.message).toContain("namee");
+      expect(parsed.error.message).toContain("unrecognized_keys");
+    }
+  });
+
+  test("attachmentSchema refinements still fire under strict", () => {
+    // .strict() must not interfere with the .refine() rules — both must
+    // still apply (mutual-exclusivity of content_base64/file_path; name
+    // required when content_base64 is used).
+    const missingName = attachmentSchema.safeParse({
+      content_base64: Buffer.from("hi").toString("base64"),
+    });
+    expect(missingName.success).toBe(false);
+
+    const both = attachmentSchema.safeParse({
+      name: "a.txt",
+      content_base64: Buffer.from("hi").toString("base64"),
+      file_path: "/tmp/x",
+    });
+    expect(both.success).toBe(false);
   });
 
   test("optional/default fields still work under strict", () => {
