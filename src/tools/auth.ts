@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getStatus } from "../auth/login.ts";
+import { loadConfig } from "../config.ts";
+import { deriveUrlPath } from "../auth/lock.ts";
 import { ok } from "./helpers.ts";
 
 export function registerAuthTools(server: McpServer): void {
@@ -19,7 +21,7 @@ export function registerAuthTools(server: McpServer): void {
 
   server.tool(
     "auth_login",
-    "Kick off interactive re-authentication for THIS profile (no risk of writing tokens to the wrong account — the profile is fixed by the server's env). Returns a `monitor` object the agent should hand to Claude Code's Monitor tool: it spawns the `gmail-mcp-auth wait` CLI which spins up a localhost OAuth loopback, prints a JSON `auth_url` event (show that URL to the user), waits for them to complete consent in the browser, then exits 0 (success) / 1 (error) / 2 (timeout). One JSON event per stdout line so Monitor surfaces each as its own notification — agent reads them live, no polling. The CLI persists the new tokens to disk before exiting, so the next gmail-mcp tool call uses them automatically.",
+    "Kick off interactive re-authentication for THIS profile (no risk of writing tokens to the wrong account — the profile is fixed by the server's env). Returns a `monitor` object the agent should hand to Claude Code's Monitor tool: it spawns the `gmail-mcp-auth wait` CLI which spins up a localhost OAuth loopback and emits one JSON event per stdout line. When the `auth_url_ready` event arrives, Read the file at `auth_url_file` (path is also in the event's `url_file` field) — that file contains the full consent URL on a single line; present it to the user. The URL is written to disk rather than streamed inline because long URLs get truncated in notification displays. The CLI exits 0 (success) / 1 (error) / 2 (timeout) and persists new tokens to disk before exiting; the running MCP server picks them up automatically on the next tool call (no /mcp reconnect needed — getOAuth() stats the token file and reloads on mtime change).",
     {
       timeout_seconds: z
         .number()
@@ -36,6 +38,8 @@ export function registerAuthTools(server: McpServer): void {
       const here = dirname(fileURLToPath(import.meta.url));
       const cliPath = resolve(here, "..", "bin", "auth.ts");
       const cliExists = existsSync(cliPath);
+      const cfg = loadConfig();
+      const authUrlFile = deriveUrlPath(cfg.tokenPath);
 
       // Monitor strips env from spawned children — bake gmail-mcp's config
       // env vars inline so the wait CLI reaches the same OAuth client + token
@@ -72,13 +76,14 @@ export function registerAuthTools(server: McpServer): void {
           // the structured `timeout` event before Monitor itself kills the child.
           timeout_ms: timeoutMs + 30_000,
         },
+        auth_url_file: authUrlFile,
         cli_path: cliPath,
         cli_exists: cliExists,
         instructions: [
           "Pass the `monitor` object above to Claude Code's Monitor tool.",
-          "On the first notification, look for `{event: \"auth_url\", url, ...}` and present that URL to the user — they sign in there.",
+          `When the \`auth_url_ready\` event arrives, use the Read tool on \`${authUrlFile}\` (also in the event's \`url_file\` field) — the file contains the full consent URL on one line. Present THAT to the user; do not try to read the URL from the notification text (long URLs get display-truncated).`,
           "Subsequent notifications (`waiting_for_callback`, `callback_received`, `tokens_persisted`, `done`) report progress.",
-          "Exit code 0 = success (tokens persisted, retry your original tool call). Exit 1 = error. Exit 2 = timeout (user never finished sign-in).",
+          "Exit code 0 = success. Retry your original tool call — the running server reloads tokens from disk automatically on the next call. Exit 1 = error. Exit 2 = timeout (user never finished sign-in).",
           "The wait CLI holds a per-profile lock file at ~/.config/gmail-mcp/login*.lock — if a second login is already in flight it errors fast.",
         ],
       });

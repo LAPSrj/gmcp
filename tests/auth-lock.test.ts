@@ -2,7 +2,13 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { acquireLock, releaseLock, deriveLockPath, type LockInfo } from "../src/auth/lock.ts";
+import {
+  acquireLock,
+  releaseLock,
+  deriveLockPath,
+  deriveUrlPath,
+  type LockInfo,
+} from "../src/auth/lock.ts";
 
 describe("deriveLockPath", () => {
   test("default tokens.json → login.lock", () => {
@@ -14,6 +20,19 @@ describe("deriveLockPath", () => {
   });
   test("custom path that doesn't match → appends suffix", () => {
     expect(deriveLockPath("/x/y/weird.json")).toBe("/x/y/weird.json.login.lock");
+  });
+});
+
+describe("deriveUrlPath", () => {
+  test("default tokens.json → login.url", () => {
+    expect(deriveUrlPath("/x/y/tokens.json")).toBe("/x/y/login.url");
+  });
+  test("profile token → profile url file", () => {
+    expect(deriveUrlPath("/x/y/tokens-takt.json")).toBe("/x/y/login-takt.url");
+  });
+  test("url path sits next to the lock path", () => {
+    const p = "/x/y/tokens-work.json";
+    expect(deriveUrlPath(p).replace(/\.url$/, ".lock")).toBe(deriveLockPath(p));
   });
 });
 

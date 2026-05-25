@@ -64,10 +64,21 @@ function isPidAlive(pid: number): boolean {
 // Derive the lock-file path from the token-file path so they share fate per
 // profile. tokens.json -> login.lock; tokens-<profile>.json -> login-<profile>.lock.
 export function deriveLockPath(tokenPath: string): string {
+  return deriveSibling(tokenPath, "lock");
+}
+
+// Sibling sidecar that holds the in-flight OAuth consent URL — written 0600
+// while the loopback is open, deleted on every exit path. Lets the agent
+// `Read` the full URL instead of relying on a Monitor event that might
+// truncate a 400+ character query string.
+export function deriveUrlPath(tokenPath: string): string {
+  return deriveSibling(tokenPath, "url");
+}
+
+function deriveSibling(tokenPath: string, ext: string): string {
   const dir = dirname(tokenPath);
   const base = tokenPath.slice(dir.length + 1);
   const m = /^tokens(-[a-zA-Z0-9_-]+)?\.json$/.exec(base);
-  if (m) return `${dir}/login${m[1] ?? ""}.lock`;
-  // Custom GMAIL_MCP_TOKEN_PATH that doesn't match the pattern — just append.
-  return `${tokenPath}.login.lock`;
+  if (m) return `${dir}/login${m[1] ?? ""}.${ext}`;
+  return `${tokenPath}.login.${ext}`;
 }

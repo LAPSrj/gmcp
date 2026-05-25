@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loginWithEvents, type LoginEvent } from "../src/auth/login.ts";
@@ -36,7 +36,7 @@ describe("loginWithEvents", () => {
     resetOAuthCache();
   });
 
-  test("emits starting → auth_url → waiting_for_callback → timeout when no callback arrives", async () => {
+  test("emits starting → auth_url_ready → waiting_for_callback → timeout, writes and cleans up url file", async () => {
     const credsPath = join(dir, "credentials.json");
     writeFileSync(
       credsPath,
@@ -45,8 +45,19 @@ describe("loginWithEvents", () => {
       }),
     );
     const tokenPath = join(dir, "tokens.json");
+    const urlFilePath = join(dir, "login.url");
 
     const events: LoginEvent[] = [];
+    // Capture URL file contents at the moment the event fires — the file is
+    // cleaned up on the timeout exit, so checking after-the-fact would race.
+    let urlAtEventTime: string | null = null;
+    const emit = (e: LoginEvent): void => {
+      events.push(e);
+      if (e.event === "auth_url_ready") {
+        urlAtEventTime = readFileSync(e.url_file, "utf8").trim();
+      }
+    };
+
     const result = await withEnv(
       {
         GMAIL_MCP_CREDENTIALS_FILE: credsPath,
@@ -54,7 +65,7 @@ describe("loginWithEvents", () => {
         GMAIL_MCP_PROFILE: undefined,
         GMAIL_MCP_REDIRECT_PORT: undefined,
       },
-      () => loginWithEvents({ emit: (e) => events.push(e), timeoutMs: 500 }),
+      () => loginWithEvents({ emit, timeoutMs: 500, urlFilePath }),
     );
 
     expect(result.reason).toBe("timeout");
@@ -62,23 +73,23 @@ describe("loginWithEvents", () => {
 
     const kinds = events.map((e) => e.event);
     expect(kinds[0]).toBe("starting");
-    expect(kinds).toContain("auth_url");
+    expect(kinds).toContain("auth_url_ready");
     expect(kinds).toContain("waiting_for_callback");
     expect(kinds[kinds.length - 1]).toBe("timeout");
 
-    const start = events.find((e) => e.event === "starting");
-    if (start && start.event === "starting") {
-      expect(start.timeout_ms).toBe(500);
-      expect(start.token_path).toBe(tokenPath);
-      expect(start.profile).toBeNull();
+    const ready = events.find((e) => e.event === "auth_url_ready");
+    if (ready && ready.event === "auth_url_ready") {
+      expect(ready.url_file).toBe(urlFilePath);
+      expect(ready.redirect_uri).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(ready.expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     }
 
-    const authUrl = events.find((e) => e.event === "auth_url");
-    if (authUrl && authUrl.event === "auth_url") {
-      expect(authUrl.url).toContain("https://accounts.google.com/");
-      expect(authUrl.url).toContain("client_id=test-client-id");
-      expect(authUrl.redirect_uri).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-      expect(authUrl.expires_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    }
+    // The URL was written to the sidecar at the moment of the event.
+    expect(urlAtEventTime).not.toBeNull();
+    expect(urlAtEventTime ?? "").toContain("https://accounts.google.com/");
+    expect(urlAtEventTime ?? "").toContain("client_id=test-client-id");
+
+    // …and the sidecar is cleaned up on the timeout exit.
+    expect(existsSync(urlFilePath)).toBe(false);
   });
 });

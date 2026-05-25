@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdir, unlink, writeFile, chmod } from "node:fs/promises";
 import http from "node:http";
+import { dirname } from "node:path";
 import { platform } from "node:os";
 import type { AddressInfo } from "node:net";
 import type { Credentials, OAuth2Client } from "google-auth-library";
@@ -33,6 +35,8 @@ export interface LoginResult {
 }
 
 // Existing CLI entrypoint — opens a browser, blocks until callback, returns email.
+// Prints the URL to stderr (the CLI is interactive — no truncation risk),
+// so this path does NOT use the sidecar file the headless `wait` flow does.
 export async function loginInteractive(): Promise<LoginResult> {
   const { client, config } = await getOAuth();
   const portToBind = config.redirectPort ?? 0;
@@ -64,9 +68,12 @@ export async function loginInteractive(): Promise<LoginResult> {
 
 // Event shape emitted by loginWithEvents. One event per JSON line so a
 // caller running this under Monitor sees each as a single notification.
+// Note: the consent URL itself is NOT in the event stream — Monitor's
+// display truncates long lines, so we write the URL to a sidecar file
+// (`url_file`) the agent must Read to get the unaltered text.
 export type LoginEvent =
   | { event: "starting"; profile: string | null; timeout_ms: number; token_path: string }
-  | { event: "auth_url"; url: string; redirect_uri: string; expires_at: string }
+  | { event: "auth_url_ready"; url_file: string; redirect_uri: string; expires_at: string }
   | { event: "waiting_for_callback" }
   | { event: "callback_received" }
   | { event: "tokens_persisted"; email: string | null; token_path: string }
@@ -79,6 +86,9 @@ export type LoginExitReason = "done" | "timeout" | "error";
 export interface LoginEventsOptions {
   emit: (e: LoginEvent) => void;
   timeoutMs?: number;
+  // Where to write the consent URL while the loopback is open. Required —
+  // the event stream only carries the path, not the URL itself.
+  urlFilePath: string;
 }
 
 export interface LoginEventsResult {
@@ -109,10 +119,11 @@ export async function loginWithEvents(
       scopes: config.scopes,
       preferredPort: portToBind,
       timeoutMs,
-      onUrl: (url, redirectUri) => {
+      onUrl: async (url, redirectUri) => {
+        await writeUrlFile(opts.urlFilePath, url);
         opts.emit({
-          event: "auth_url",
-          url,
+          event: "auth_url_ready",
+          url_file: opts.urlFilePath,
           redirect_uri: redirectUri,
           expires_at: new Date(Date.now() + timeoutMs).toISOString(),
         });
@@ -121,6 +132,7 @@ export async function loginWithEvents(
       onCallback: () => opts.emit({ event: "callback_received" }),
     });
   } catch (err) {
+    await deleteUrlFile(opts.urlFilePath);
     if (err instanceof LoginTimeoutError) {
       opts.emit({ event: "timeout", timeout_ms: timeoutMs });
       return { reason: "timeout", email: null };
@@ -131,6 +143,7 @@ export async function loginWithEvents(
     });
     return { reason: "error", email: null };
   }
+  await deleteUrlFile(opts.urlFilePath);
 
   await writeTokens(config.tokenPath, tokens);
   client.setCredentials(tokens);
@@ -156,11 +169,29 @@ class LoginTimeoutError extends Error {
   }
 }
 
+async function writeUrlFile(path: string, url: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${url}\n`, "utf8");
+  try {
+    await chmod(path, 0o600);
+  } catch {
+    // chmod may fail on WSL/non-POSIX FS; not fatal
+  }
+}
+
+export async function deleteUrlFile(path: string): Promise<void> {
+  try {
+    await unlink(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+}
+
 interface LoopbackOpts {
   client: OAuth2Client;
   scopes: string[];
   preferredPort: number;
-  onUrl?: (authUrl: string, redirectUri: string) => void;
+  onUrl?: (authUrl: string, redirectUri: string) => void | Promise<void>;
   onCallback?: () => void;
   timeoutMs?: number;
 }
@@ -197,7 +228,13 @@ function runLoopback(opts: LoopbackOpts): Promise<Credentials> {
         prompt: "consent",
         redirect_uri: redirectUri,
       });
-      onUrl?.(authUrl, redirectUri);
+      void (async () => {
+        try {
+          await onUrl?.(authUrl, redirectUri);
+        } catch (err) {
+          finish(() => reject(err));
+        }
+      })();
 
       if (timeoutMs && timeoutMs > 0) {
         timer = setTimeout(() => {

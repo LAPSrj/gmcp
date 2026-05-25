@@ -7,10 +7,16 @@ import {
   logoutLocal,
   getStatus,
   loginWithEvents,
+  deleteUrlFile,
   type LoginEvent,
 } from "../auth/login.ts";
 import { loadConfig } from "../config.ts";
-import { acquireLock, releaseLock, deriveLockPath } from "../auth/lock.ts";
+import {
+  acquireLock,
+  releaseLock,
+  deriveLockPath,
+  deriveUrlPath,
+} from "../auth/lock.ts";
 
 function usage(): never {
   console.error(`gmail-mcp-auth — manage gmail-mcp auth state
@@ -102,11 +108,16 @@ async function main(): Promise<void> {
 
 async function runWait(tokenPath: string): Promise<void> {
   const lockPath = deriveLockPath(tokenPath);
+  const urlFilePath = deriveUrlPath(tokenPath);
   const timeoutMs = Number(process.env.GMAIL_MCP_LOGIN_TIMEOUT_MS ?? 5 * 60 * 1000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     emitEvent({ event: "error", message: "GMAIL_MCP_LOGIN_TIMEOUT_MS must be a positive number." });
     process.exit(1);
   }
+
+  // Sweep any stale URL file from a prior aborted wait — fine to nuke since
+  // the lock check below guarantees no live wait owns it.
+  await deleteUrlFile(urlFilePath);
 
   try {
     await acquireLock(lockPath);
@@ -118,9 +129,11 @@ async function runWait(tokenPath: string): Promise<void> {
     process.exit(1);
   }
 
-  // Best-effort release on signal so a Ctrl-C doesn't leave a stale lock.
+  // Best-effort cleanup on signal so a Ctrl-C doesn't leave a stale lock
+  // or a stale URL file containing a still-valid (but unusable) consent URL.
   const cleanup = (): void => {
     void releaseLock(lockPath);
+    void deleteUrlFile(urlFilePath);
   };
   process.on("SIGINT", () => {
     cleanup();
@@ -133,9 +146,10 @@ async function runWait(tokenPath: string): Promise<void> {
 
   let result;
   try {
-    result = await loginWithEvents({ emit: emitEvent, timeoutMs });
+    result = await loginWithEvents({ emit: emitEvent, timeoutMs, urlFilePath });
   } finally {
     await releaseLock(lockPath);
+    await deleteUrlFile(urlFilePath);
   }
 
   if (result.reason === "done") process.exit(0);
