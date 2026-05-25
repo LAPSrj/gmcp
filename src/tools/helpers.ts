@@ -1,4 +1,27 @@
+import { z } from "zod";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+
+// Wrap server.tool() so every subsequent registration gets `.strict()` applied
+// to its inputSchema. Default ZodObject behavior silently strips unknown keys —
+// a typoed param like `save_to_path` instead of `output_path` falls through with
+// the legitimate args, hiding the bug. Strict mode rejects with the offending
+// key named, surfacing the typo at the call site.
+//
+// Mutating the RegisteredTool's inputSchema is safe: the SDK reads it live from
+// `validateToolInput` and from the tools/list manifest builder.
+export function strictifyToolRegistration(server: McpServer): void {
+  const orig = server.tool.bind(server);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (server as any).tool = (...args: unknown[]) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = (orig as (...a: unknown[]) => any)(...args);
+    if (result && result.inputSchema instanceof z.ZodObject) {
+      result.inputSchema = (result.inputSchema as z.ZodObject<z.ZodRawShape>).strict();
+    }
+    return result;
+  };
+}
 
 export function ok(data: unknown): CallToolResult {
   return {

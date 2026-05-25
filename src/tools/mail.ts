@@ -7,11 +7,20 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { googleRequest, googleList, GoogleError } from "../google/client.ts";
 import {
   ok,
+  err,
   base64urlEncode,
   base64urlToStandardBase64,
   base64urlDecodeToBuffer,
   type Recipient,
 } from "./helpers.ts";
+
+// Inline-base64 size cap on mail_get_attachment. Base64 inflates ~33%, so a
+// 200 KB attachment becomes ~267 KB of agent output — under the harness limit
+// while still useful for small images/PDFs. Larger attachments must use
+// output_path to write server-side. Mirrors the SEND-side `file_path` guard
+// so bytes never accidentally flow through the agent's context in either
+// direction.
+const INLINE_ATTACHMENT_BYTE_LIMIT = 200 * 1024;
 import {
   buildMimeMessage,
   composeQuotedBody,
@@ -302,11 +311,16 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_get_attachment",
-    "Download an email attachment. Returns base64 by default, or writes to output_path if provided.",
+    `Download an email attachment. Writes to output_path when provided, otherwise returns inline base64 — but only for attachments at or below ${Math.round(INLINE_ATTACHMENT_BYTE_LIMIT / 1024)} KB. Anything larger requires output_path; the inline-base64 response would blow the agent's output limit (base64 inflates ~33%).`,
     {
       message_id: z.string(),
       attachment_id: z.string(),
-      output_path: z.string().optional().describe("Absolute path to write the file. If omitted, returns base64."),
+      output_path: z
+        .string()
+        .optional()
+        .describe(
+          "Absolute path to write the file. REQUIRED for attachments larger than ~200 KB. Omit only for small attachments (icons, tiny PDFs) where you actually want the bytes inline.",
+        ),
     },
     async ({ message_id, attachment_id, output_path }) => {
       const att = await googleRequest<{ size?: number; data?: string }>({
@@ -339,6 +353,13 @@ export function registerMailTools(server: McpServer): void {
       if (output_path) {
         await writeFile(output_path, bytes);
         return ok({ name, content_type: contentType, size: bytes.length, saved_to: output_path });
+      }
+      if (bytes.length > INLINE_ATTACHMENT_BYTE_LIMIT) {
+        const kb = (bytes.length / 1024).toFixed(1);
+        const limitKb = Math.round(INLINE_ATTACHMENT_BYTE_LIMIT / 1024);
+        return err(
+          `attachment '${name}' is ${bytes.length} bytes (${kb} KB) — exceeds the ${limitKb} KB inline-base64 cap. Re-call mail_get_attachment with output_path set to an absolute file path; returning inline base64 would exceed the agent's output limit.`,
+        );
       }
       return ok({
         name,

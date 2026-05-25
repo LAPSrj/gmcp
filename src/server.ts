@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.ts";
+import { strictifyToolRegistration } from "./tools/helpers.ts";
 import { registerAccountTools } from "./tools/account.ts";
 import { registerMailTools } from "./tools/mail.ts";
 import { registerCalendarTools } from "./tools/calendar.ts";
@@ -15,6 +16,10 @@ async function main(): Promise<void> {
     name: "gmail-mcp",
     version: "0.1.0",
   });
+
+  // Patch server.tool() before any registration so every tool's inputSchema
+  // becomes strict (unknown keys reject by name instead of silently dropping).
+  strictifyToolRegistration(server);
 
   registerAccountTools(server);
   registerMailTools(server);
