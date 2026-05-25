@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { googleRequest, googleList, GoogleError } from "../google/client.ts";
@@ -30,11 +30,75 @@ const recipientSchema = z.object({
   name: z.string().optional(),
 });
 
-const attachmentSchema = z.object({
-  name: z.string().describe("File name with extension"),
-  content_type: z.string().default("application/octet-stream"),
-  content_base64: z.string().describe("Base64-encoded file content (standard base64, not base64url)"),
-});
+const attachmentSchema = z
+  .object({
+    name: z
+      .string()
+      .optional()
+      .describe("File name with extension. Required when content_base64 is used; defaults to basename(file_path) when omitted."),
+    content_type: z.string().default("application/octet-stream"),
+    content_base64: z
+      .string()
+      .optional()
+      .describe(
+        "Base64-encoded file content (standard base64, not base64url). Mutually exclusive with file_path. Use this for inline bytes the agent already has; prefer file_path for anything larger than a few KB to keep bytes out of the agent's context window.",
+      ),
+    file_path: z
+      .string()
+      .optional()
+      .describe(
+        "Absolute path to a file on the MCP server's disk. The server reads and base64-encodes it server-side, so the bytes never enter the agent's context. Mutually exclusive with content_base64. Path must be absolute and free of '..' segments.",
+      ),
+  })
+  .refine((a) => Boolean(a.content_base64) !== Boolean(a.file_path), {
+    message: "Provide exactly one of content_base64 or file_path.",
+  })
+  .refine((a) => !a.content_base64 || (a.name && a.name.length > 0), {
+    message: "name is required when content_base64 is used (it can be omitted with file_path to default to basename).",
+  });
+
+type AttachmentInput = z.input<typeof attachmentSchema>;
+
+interface MaterializedAttachment {
+  name: string;
+  content_type: string;
+  content_base64: string;
+}
+
+async function materializeAttachments(
+  atts: AttachmentInput[] | undefined,
+): Promise<MaterializedAttachment[]> {
+  if (!atts || atts.length === 0) return [];
+  return Promise.all(
+    atts.map(async (a) => {
+      if (a.file_path) {
+        if (!isAbsolute(a.file_path)) {
+          throw new Error(`attachment.file_path must be absolute: ${a.file_path}`);
+        }
+        if (a.file_path.split(/[\\/]/).includes("..")) {
+          throw new Error(`attachment.file_path must not contain '..' segments: ${a.file_path}`);
+        }
+        let buf: Buffer;
+        try {
+          buf = await readFile(a.file_path);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          throw new Error(`Failed to read attachment.file_path (${a.file_path}): ${msg}`);
+        }
+        return {
+          name: a.name ?? basename(a.file_path),
+          content_type: a.content_type ?? "application/octet-stream",
+          content_base64: buf.toString("base64"),
+        };
+      }
+      return {
+        name: a.name!,
+        content_type: a.content_type ?? "application/octet-stream",
+        content_base64: a.content_base64!,
+      };
+    }),
+  );
+}
 
 // ---------- Folder ↔ label mapping ----------
 
@@ -455,6 +519,7 @@ export function registerMailTools(server: McpServer): void {
     "Compose and send an email immediately. Note: Gmail always saves a copy to SENT; the save_to_sent flag is accepted for outlook parity but has no effect.",
     { ...composeShape, save_to_sent: z.boolean().default(true) },
     async (args) => {
+      const attachments = await materializeAttachments(args.attachments);
       const { raw } = buildMimeMessage({
         to: args.to,
         cc: args.cc,
@@ -462,7 +527,7 @@ export function registerMailTools(server: McpServer): void {
         subject: args.subject,
         body: args.body,
         bodyFormat: args.body_format,
-        attachments: args.attachments,
+        attachments,
       });
       const sent = await googleRequest<{ id: string; threadId: string }>({
         api: "gmail",
@@ -479,6 +544,7 @@ export function registerMailTools(server: McpServer): void {
     "Create a draft email (not sent). Returns the draft id.",
     composeShape,
     async (args) => {
+      const attachments = await materializeAttachments(args.attachments);
       const { raw } = buildMimeMessage({
         to: args.to,
         cc: args.cc,
@@ -486,7 +552,7 @@ export function registerMailTools(server: McpServer): void {
         subject: args.subject,
         body: args.body,
         bodyFormat: args.body_format,
-        attachments: args.attachments,
+        attachments,
       });
       const created = await googleRequest<{ id: string; message?: { id: string; threadId: string } }>({
         api: "gmail",
@@ -512,6 +578,7 @@ export function registerMailTools(server: McpServer): void {
       attachments: z.array(attachmentSchema).optional(),
     },
     async ({ id, to, cc, bcc, subject, body, body_format, attachments }) => {
+      const materialized = await materializeAttachments(attachments);
       const { raw } = buildMimeMessage({
         to: to ?? [{ email: "" }], // Gmail accepts empty fields in a draft; caller should refill
         cc,
@@ -519,7 +586,7 @@ export function registerMailTools(server: McpServer): void {
         subject: subject ?? "",
         body: body ?? "",
         bodyFormat: body_format,
-        attachments,
+        attachments: materialized,
       });
       await googleRequest({
         api: "gmail",
@@ -1042,3 +1109,5 @@ function collectParticipants(msgs: GmailMessage[]): { email: string; name: strin
 
 // Re-export for tests / external use; silences unused-import warnings.
 export { base64urlEncode, base64urlToStandardBase64 };
+export { attachmentSchema, materializeAttachments };
+export type { AttachmentInput, MaterializedAttachment };
