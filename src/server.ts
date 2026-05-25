@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./config.ts";
 import { strictifyToolRegistration } from "./tools/helpers.ts";
 import { registerAccountTools } from "./tools/account.ts";
+import { registerAuthTools } from "./tools/auth.ts";
 import { registerMailTools } from "./tools/mail.ts";
 import { registerCalendarTools } from "./tools/calendar.ts";
 import { registerContactsTools } from "./tools/contacts.ts";
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
   strictifyToolRegistration(server);
 
   registerAccountTools(server);
+  registerAuthTools(server);
   registerMailTools(server);
   registerCalendarTools(server);
   registerContactsTools(server);

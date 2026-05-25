@@ -8,6 +8,8 @@ Modelled on `outlook-mcp`; tool names and argument shapes match wherever the und
 
 **Account (2 tools):** `who_am_i`, `mailbox_get_settings` (timezone, auto-responder).
 
+**Auth (2 tools):** `auth_status` (cheap probe — are tokens still valid for this profile?), `auth_login` (returns a Monitor() invocation that drives `gmail-mcp-auth wait`; the agent shows the returned `auth_url` to the user, the loopback collects the callback and persists new tokens — no shell-out, no risk of writing to the wrong profile).
+
 **Mail (23 tools):** `mail_list`, `mail_search` (Gmail `q` syntax), `mail_get`, `mail_get_attachment`, `mail_list_labels`, `mail_create_label`, `mail_apply_labels`, `mail_get_thread`, `mail_list_threads`, `mail_send`, `mail_create_draft`, `mail_update_draft`, `mail_send_draft`, `mail_reply`, `mail_reply_all`, `mail_forward`, `mail_move`, `mail_mark_read`, `mail_mark_unread`, `mail_flag`, `mail_delete`, `mail_listen_inbox` (long-poll via history API), `mail_listen_instructions` (returns a Monitor() invocation for a persistent NDJSON event stream — firehose, or filtered to one thread for "watch replies to this email").
 
 **Calendar (7 tools):** `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `calendar_list_event_instances`, `calendar_find_free_slots` (multi-calendar via `freeBusy`), `calendar_create_event` (with Google Meet auto-provision), `calendar_update_event`, `calendar_delete_event`, `calendar_respond`.
@@ -147,6 +149,7 @@ Restart Claude Code. The Gmail and Calendar tools become available to any agent 
 | `GMAIL_MCP_CREDENTIALS_FILE` | _(required)_ | Path to the OAuth client JSON downloaded from Google Cloud Console (the file containing `installed.client_id` and `installed.client_secret`). |
 | `GMAIL_MCP_TOKEN_PATH` | `~/.config/gmail-mcp/tokens.json` | Where the refresh + access tokens are cached (mode `0600`). |
 | `GMAIL_MCP_REDIRECT_PORT` | _(random)_ | Pin the loopback redirect port (useful if your network policy is strict). |
+| `GMAIL_MCP_LOGIN_TIMEOUT_MS` | `300000` (5 min) | Timeout for `gmail-mcp-auth wait` and the `auth_login` MCP tool. |
 
 ## Scopes requested
 
@@ -188,7 +191,8 @@ src/
 ├─ auth/
 │  ├─ oauth.ts          # google-auth-library OAuth2Client factory
 │  ├─ store.ts          # file-backed token cache, 0600
-│  ├─ login.ts          # interactive loopback flow + logout/status
+│  ├─ login.ts          # loopback flow (interactive + headless event-emitting) + logout/status
+│  ├─ lock.ts           # per-profile single-flight lock for `gmail-mcp-auth wait`
 │  └─ token.ts          # getAccessToken — auto-refreshes
 ├─ google/
 │  ├─ client.ts         # authed fetch wrapper + paging + 429/5xx retry
@@ -200,6 +204,7 @@ src/
 ├─ tools/
 │  ├─ helpers.ts
 │  ├─ account.ts        # who_am_i, mailbox_get_settings
+│  ├─ auth.ts           # auth_status, auth_login (agent-triggered re-auth)
 │  ├─ mail.ts           # mail_* tools (22)
 │  ├─ calendar.ts       # calendar_* tools (7)
 │  └─ contacts.ts       # contacts_* tools (read-only)
@@ -214,7 +219,7 @@ tests/                  # bun:test unit tests for the pure helpers
 - **`invalid_grant` from auth tools, hours-or-days after `login`:** for unverified apps Google expires refresh tokens after 7 days of inactivity. Re-run `gmail-mcp-auth login`. To eliminate the 7-day clock, publish the OAuth consent screen and verify the app.
 - **`access_denied` at the consent screen:** the Google account you're signing in with isn't on the **Test users** list. Add it in OAuth consent screen → Test users.
 - **`This app isn't verified` warning at consent:** expected for an unverified Desktop client. Click "Advanced" → "Go to gmail-mcp (unsafe)" — it's *your* OAuth client; only you can sign into it.
-- **`Not signed in` from the MCP server:** the server reuses the local token cache. Run `bun run src/bin/auth.ts status` to verify, then `... login` if missing.
+- **`Not signed in` from the MCP server:** the server reuses the local token cache. Run `bun run src/bin/auth.ts status` to verify, then `... login` if missing. From inside an agent session you can also call the `auth_login` MCP tool — it returns a Monitor() invocation that drives the `gmail-mcp-auth wait` CLI for the **same profile this server is running as**, so there's no risk of writing tokens to the wrong account.
 - **Third-party meeting URL silently moved to `location`:** intended — Google's `conferenceData` does not accept third-party join URLs. See `PLAN.md` §3 item 5 and the `warnings` entry on the response.
 - **`calendar_respond` rejects `propose_new_time`:** intended — Google Calendar has no equivalent API. Decline with a comment + email the organizer instead.
 - **`mail_listen_inbox` returns `reseeded: true`:** your `since_token` was older than ~7 days (Gmail's history retention). The cursor was reset to "now" and some messages may have been missed in the gap.
