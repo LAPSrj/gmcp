@@ -1,4 +1,4 @@
-# gmail-mcp
+# gmcp
 
 An MCP server that gives Claude (or any MCP client) read/write access to a Google account — Gmail, Google Calendar, and read-only People (contacts) — via the Google REST APIs.
 
@@ -19,7 +19,7 @@ Modelled on `outlook-mcp`; tool names and argument shapes match wherever the und
 ## Quickstart
 
 ```bash
-git clone <this-repo> gmail-mcp && cd gmail-mcp
+git clone <this-repo> gmcp && cd gmcp
 bun install
 cp .env.example .env                                          # then edit .env with your credentials path
 bun run login                                                 # one-time browser sign-in (reads .env)
@@ -34,7 +34,7 @@ Restart Claude Code; the Gmail and Calendar tools become available to any agent.
 
 ### 1. Create an OAuth client in Google Cloud Console
 
-1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and pick (or create) a project. If you also use `gdrive-mcp`, you can use the same project — but create a **separate OAuth client** for gmail-mcp so scopes and revocation stay isolated (see `DECISIONS.md` #1).
+1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and pick (or create) a project. If you also use `gdrive-mcp`, you can use the same project — but create a **separate OAuth client** for gmcp so scopes and revocation stay isolated (see `DECISIONS.md` #1).
 
 2. **Enable the APIs** this server uses:
    - APIs & Services → Library → enable each:
@@ -45,23 +45,23 @@ Restart Claude Code; the Gmail and Calendar tools become available to any agent.
 3. **Configure the OAuth consent screen** (one-time per project, if not already done):
    - APIs & Services → OAuth consent screen
    - User type: **External**
-   - App name: anything (e.g. `gmail-mcp`)
+   - App name: anything (e.g. `gmcp`)
    - Add yourself as a **Test user** so the unverified-app consent screen will accept your Google account during development.
    - Scopes — you do not need to add them here; Google asks for them at sign-in time.
 
 4. **Create the OAuth client:**
    - APIs & Services → Credentials → **+ Create credentials** → **OAuth client ID**
    - Application type: **Desktop app**
-   - Name: e.g. `gmail-mcp desktop`
+   - Name: e.g. `gmcp desktop`
    - Click Create. In the dialog, click **Download JSON** — save it somewhere safe (e.g. `~/.config/gmail-mcp/credentials.json`).
 
-The downloaded file has `installed.client_id` and `installed.client_secret` — that's what gmail-mcp reads.
+The downloaded file has `installed.client_id` and `installed.client_secret` — that's what gmcp reads.
 
 ### 2. Install the server
 
 ```bash
-git clone <this-repo> gmail-mcp
-cd gmail-mcp
+git clone <this-repo> gmcp
+cd gmcp
 bun install
 ```
 
@@ -123,7 +123,7 @@ Add to your Claude Code MCP settings (`~/.config/claude-code/config.json` or via
   "mcpServers": {
     "gmail": {
       "command": "bun",
-      "args": ["run", "/absolute/path/to/gmail-mcp/src/server.ts"],
+      "args": ["run", "/absolute/path/to/gmcp/src/server.ts"],
       "env": {
         "GMAIL_MCP_CREDENTIALS_FILE": "/absolute/path/to/credentials.json"
       }
@@ -218,7 +218,7 @@ tests/                  # bun:test unit tests for the pure helpers
 
 - **`invalid_grant` from auth tools, hours-or-days after `login`:** for unverified apps Google expires refresh tokens after 7 days of inactivity. Re-run `gmail-mcp-auth login`. To eliminate the 7-day clock, publish the OAuth consent screen and verify the app.
 - **`access_denied` at the consent screen:** the Google account you're signing in with isn't on the **Test users** list. Add it in OAuth consent screen → Test users.
-- **`This app isn't verified` warning at consent:** expected for an unverified Desktop client. Click "Advanced" → "Go to gmail-mcp (unsafe)" — it's *your* OAuth client; only you can sign into it.
+- **`This app isn't verified` warning at consent:** expected for an unverified Desktop client. Click "Advanced" → "Go to gmcp (unsafe)" — it's *your* OAuth client; only you can sign into it.
 - **`Not signed in` from the MCP server:** the server reuses the local token cache. Run `bun run src/bin/auth.ts status` to verify, then `... login` if missing. From inside an agent session you can also call the `auth_login` MCP tool — it returns a Monitor() invocation that drives the `gmail-mcp-auth wait` CLI for the **same profile this server is running as**, so there's no risk of writing tokens to the wrong account.
 - **Third-party meeting URL silently moved to `location`:** intended — Google's `conferenceData` does not accept third-party join URLs. See `PLAN.md` §3 item 5 and the `warnings` entry on the response.
 - **`calendar_respond` rejects `propose_new_time`:** intended — Google Calendar has no equivalent API. Decline with a comment + email the organizer instead.

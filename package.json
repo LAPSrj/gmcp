@@ -1,5 +1,5 @@
 {
-  "name": "gmail-mcp",
+  "name": "gmcp",
   "version": "0.1.0",
   "description": "MCP server for Gmail + Google Calendar (and read-only Google Contacts) — modelled on outlook-mcp",
   "type": "module",
