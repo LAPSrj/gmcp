@@ -23,16 +23,30 @@ describe("notePoll", () => {
     expect(notePoll("k", 40_000)).toBe(true);
   });
 
-  test("tolerates approximately-equal intervals (within ±50%)", () => {
+  test("tolerates approximately-equal short intervals (proportional)", () => {
     notePoll("k", 0);
     notePoll("k", 10_000);
-    expect(notePoll("k", 23_000)).toBe(true); // 13s vs 10s — within tolerance
+    expect(notePoll("k", 23_000)).toBe(true); // 13s vs 10s — drift 3s ≤ 50%·10s
   });
 
   test("no nudge when intervals are irregular", () => {
     notePoll("k", 0);
     notePoll("k", 10_000);
     expect(notePoll("k", 90_000)).toBe(false); // 80s vs 10s — too uneven
+  });
+
+  test("long intervals are held to the ±2min absolute cap, not ±50%", () => {
+    const min = 60_000;
+    // 19min then 20min — drift 1min ≤ 2min cap → still regular.
+    notePoll("near", 0);
+    notePoll("near", 19 * min);
+    expect(notePoll("near", 39 * min)).toBe(true);
+
+    // 12min then 16min — drift 4min. Under ±50% (±6min) this would pass, but the
+    // 2min cap rejects it.
+    notePoll("far", 0);
+    notePoll("far", 12 * min);
+    expect(notePoll("far", 28 * min)).toBe(false);
   });
 
   test("no nudge for sub-second bursts (e.g. pagination)", () => {

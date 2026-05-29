@@ -24,9 +24,14 @@ const MIN_CALLS = 3;
 // pagination), slower than MAX is a spaced-out check not worth nudging.
 const MIN_INTERVAL_MS = 1_000;
 const MAX_INTERVAL_MS = 20 * 60_000;
-// Consecutive intervals within ±TOLERANCE of each other count as "approximately
-// the same interval".
-const TOLERANCE = 0.5;
+// How close two consecutive intervals must be to count as "approximately the
+// same interval". A pure percentage is too loose at long intervals (±50% of
+// 20min is ±10min — it'd match a 20min poll against a 30min gap), and a pure
+// fixed window is too loose at short intervals (±2min would match a 10s poll
+// against a 130s gap). So the allowed drift is the *smaller* of the two:
+// proportional for short intervals, capped to an absolute ceiling for long ones.
+const TOLERANCE_FRACTION = 0.5;
+const TOLERANCE_ABS_CAP_MS = 2 * 60_000; // ±2 min ceiling
 
 // Record a call for `key` at `now` (ms epoch) and return true when the last
 // MIN_CALLS calls form an approximately-regular interval within the polling
@@ -55,7 +60,8 @@ export function notePoll(key: string, now: number): boolean {
 
   const lo = Math.min(i1, i2);
   const hi = Math.max(i1, i2);
-  return hi <= lo * (1 + TOLERANCE);
+  const allowedDrift = Math.min(lo * TOLERANCE_FRACTION, TOLERANCE_ABS_CAP_MS);
+  return hi - lo <= allowedDrift;
 }
 
 // Convenience: record the call and return the nudge message when the polling
