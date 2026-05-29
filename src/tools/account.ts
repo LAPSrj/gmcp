@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { googleRequest } from "../google/client.ts";
+import { getAccountSignature } from "../google/signature.ts";
 import { ok } from "./helpers.ts";
 
 interface GmailProfile {
@@ -57,10 +58,10 @@ export function registerAccountTools(server: McpServer): void {
 
   server.tool(
     "mailbox_get_settings",
-    "Get the user's Gmail + Calendar settings: timezone, auto-reply (vacation) state. Use this to pick sensible defaults for calendar tools. Note: unlike Outlook, Gmail/Calendar does not expose working hours on the profile — pass them explicitly to calendar_find_free_slots.",
+    "Get the user's Gmail + Calendar settings: timezone, auto-reply (vacation) state, and the HTML signature (if any). Use this to pick sensible defaults for calendar tools. Note: unlike Outlook, Gmail/Calendar does not expose working hours on the profile — pass them explicitly to calendar_find_free_slots.",
     {},
     async () => {
-      const [vacation, calSettings] = await Promise.all([
+      const [vacation, calSettings, signature] = await Promise.all([
         googleRequest<VacationSettings>({
           api: "gmail",
           path: "/users/me/settings/vacation",
@@ -69,6 +70,7 @@ export function registerAccountTools(server: McpServer): void {
           api: "calendar",
           path: "/users/me/settings",
         }).catch(() => null),
+        getAccountSignature(),
       ]);
       const tz = calSettings?.items?.find((s) => s.id === "timezone")?.value ?? null;
       const locale = calSettings?.items?.find((s) => s.id === "locale")?.value ?? null;
@@ -79,6 +81,7 @@ export function registerAccountTools(server: McpServer): void {
         date_format: dateFormat,
         time_format: null,
         working_hours: null, // not exposed on Google; pass explicit hours to calendar_find_free_slots
+        signature, // HTML signature from the primary send-as identity, or null when none is set
         automatic_replies: vacation
           ? {
               status: vacation.enableAutoReply ? "enabled" : "disabled",

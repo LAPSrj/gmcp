@@ -2,11 +2,14 @@ import { describe, test, expect } from "bun:test";
 import {
   buildMimeMessage,
   composeQuotedBody,
+  composeQuotedBodyWithSignature,
   extractAttachments,
   extractBody,
   getHeader,
   parseAddress,
   parseAddressList,
+  plainTextToHtml,
+  withSignature,
 } from "../src/google/mime.ts";
 import { base64urlDecodeToBuffer } from "../src/tools/helpers.ts";
 
@@ -193,6 +196,90 @@ describe("composeQuotedBody", () => {
     expect(out).toContain("blockquote");
     expect(out).toContain("&lt;script&gt;");
     expect(out).not.toContain("<script>");
+  });
+});
+
+describe("withSignature", () => {
+  test("no signature is a no-op (body + format unchanged)", () => {
+    expect(withSignature({ body: "hi", bodyFormat: "text", signatureHtml: null })).toEqual({
+      body: "hi",
+      bodyFormat: "text",
+    });
+    expect(withSignature({ body: "hi", bodyFormat: "text", signatureHtml: "   " })).toEqual({
+      body: "hi",
+      bodyFormat: "text",
+    });
+  });
+
+  test("html body: signature appended, format stays html", () => {
+    const out = withSignature({
+      body: "<p>hello</p>",
+      bodyFormat: "html",
+      signatureHtml: "<b>Me</b>",
+    });
+    expect(out.bodyFormat).toBe("html");
+    expect(out.body).toContain("<p>hello</p>");
+    expect(out.body).toContain("<b>Me</b>");
+    expect(out.body.indexOf("<p>hello</p>")).toBeLessThan(out.body.indexOf("<b>Me</b>"));
+  });
+
+  test("text body auto-upgrades to html and escapes the body", () => {
+    const out = withSignature({
+      body: "a < b\nnext",
+      bodyFormat: "text",
+      signatureHtml: "<b>Me</b>",
+    });
+    expect(out.bodyFormat).toBe("html");
+    expect(out.body).toContain("a &lt; b");
+    expect(out.body).toContain("<br>"); // newline became a break
+    expect(out.body).toContain("<b>Me</b>");
+    expect(out.body).not.toContain("a < b"); // raw text was escaped
+  });
+});
+
+describe("plainTextToHtml", () => {
+  test("escapes &, <, > and converts newlines to <br>", () => {
+    expect(plainTextToHtml("a & b < c > d\ne")).toBe("a &amp; b &lt; c &gt; d<br>e");
+  });
+});
+
+describe("composeQuotedBodyWithSignature", () => {
+  const original = {
+    from: "Alice <alice@x.com>",
+    date: "Wed, 13 May 2026 10:00:00 -0300",
+    subject: "Hi",
+    bodyText: "first line\nsecond line",
+  };
+
+  test("no signature → behaves like composeQuotedBody (text quote preserved)", () => {
+    const out = composeQuotedBodyWithSignature({
+      comment: "Looks good.",
+      bodyOverride: undefined,
+      bodyFormat: "text",
+      signatureHtml: null,
+      original,
+      mode: "reply",
+    });
+    expect(out.bodyFormat).toBe("text");
+    expect(out.body).toContain("Looks good.");
+    expect(out.body).toContain("> first line");
+  });
+
+  test("with signature → upgrades to html, signature sits above the quote", () => {
+    const out = composeQuotedBodyWithSignature({
+      comment: "Looks good.",
+      bodyOverride: undefined,
+      bodyFormat: "text",
+      signatureHtml: "<b>Me</b>",
+      original,
+      mode: "reply",
+    });
+    expect(out.bodyFormat).toBe("html");
+    expect(out.body).toContain("Looks good.");
+    expect(out.body).toContain("<b>Me</b>");
+    expect(out.body).toContain("blockquote"); // original is html-quoted now
+    // signature comes before the quoted original
+    expect(out.body.indexOf("<b>Me</b>")).toBeLessThan(out.body.indexOf("blockquote"));
   });
 });
 

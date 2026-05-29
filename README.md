@@ -150,6 +150,7 @@ Restart Claude Code. The Gmail and Calendar tools become available to any agent 
 | `GMAIL_MCP_TOKEN_PATH` | `~/.config/gmail-mcp/tokens.json` | Where the refresh + access tokens are cached (mode `0600`). |
 | `GMAIL_MCP_REDIRECT_PORT` | _(random)_ | Pin the loopback redirect port (useful if your network policy is strict). |
 | `GMAIL_MCP_LOGIN_TIMEOUT_MS` | `300000` (5 min) | Timeout for `gmail-mcp-auth wait` and the `auth_login` MCP tool. |
+| `GMAIL_MCP_AUTO_SIGNATURE` | `false` | When truthy (`1`/`true`/`yes`/`on`), `mail_send`, `mail_create_draft`, `mail_update_draft`, `mail_reply`, `mail_reply_all`, and `mail_forward` append your Gmail signature by default. Override per call with the `include_signature` argument. |
 
 ## Scopes requested
 
@@ -166,6 +167,7 @@ https://www.googleapis.com/auth/contacts.other.readonly  # "other" contacts (peo
 - `mail_delete` moves the message to **TRASH** (Gmail's recoverable bin — 30 days). There is no permanent-delete tool — by design.
 - `calendar_delete_event` with `cancel_with_notification=true` sends Google's standard cancellation emails to attendees. Pass `false` to delete silently if you're the organizer and don't want a notification storm.
 - Token cache is created with `0600` permissions where supported.
+- **Signatures are not automatic in the Gmail API.** Signatures are a compose-time feature of the Gmail web/mobile clients — `messages.send` transmits exactly the MIME it's given, so mail sent through any API (including this server) is signature-less unless you opt in. Set `GMAIL_MCP_AUTO_SIGNATURE=1` (or pass `include_signature: true` per call) to have the server fetch your primary send-as signature and append it. Because Gmail signatures are HTML, a plain-text body is sent as `text/html` when a signature is appended; on replies/forwards the signature sits above the quoted original. The signature is read once per process from `users.settings.sendAs` (covered by the existing `gmail.modify` scope) and cached.
 
 ## Differences from outlook-mcp
 

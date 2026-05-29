@@ -273,11 +273,7 @@ export function composeQuotedBody(args: {
       : `\n\nOn ${original.date ?? ""}, ${original.from ?? "the sender"} wrote:\n`;
   if (bodyFormat === "html") {
     const top = bodyOverride ?? comment ?? "";
-    const escapedOriginal = original.bodyText
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/\n/g, "<br>");
+    const escapedOriginal = plainTextToHtml(original.bodyText);
     const headHtml = head.replace(/\n/g, "<br>");
     return `${top}${headHtml}<blockquote style="margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex">${escapedOriginal}</blockquote>`;
   }
@@ -287,4 +283,78 @@ export function composeQuotedBody(args: {
     .map((l) => `> ${l}`)
     .join("\n");
   return `${top}${head}${quoted}`;
+}
+
+// ---------- Signatures ----------
+
+// Escape plain text into minimal HTML. Used when auto-upgrading a plain-text
+// body to HTML so an (HTML) signature can be appended.
+export function plainTextToHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\n/g, "<br>");
+}
+
+// Wrap a Gmail sendAs signature (already HTML) in a delimited block, separated
+// from the body by a blank line.
+export function signatureBlockHtml(signatureHtml: string): string {
+  return `<br><br><div class="gmail_signature">${signatureHtml}</div>`;
+}
+
+// Append the account signature to a freshly-composed (non-quoted) body. Gmail
+// signatures are HTML, so a plain-text body is auto-upgraded to HTML when a
+// signature is present. Returns the (possibly reformatted) body + the format
+// actually used. A null/empty signature is a no-op.
+export function withSignature(args: {
+  body: string;
+  bodyFormat: "text" | "html";
+  signatureHtml: string | null | undefined;
+}): { body: string; bodyFormat: "text" | "html" } {
+  const sig = args.signatureHtml?.trim();
+  if (!sig) return { body: args.body, bodyFormat: args.bodyFormat };
+  const block = signatureBlockHtml(sig);
+  if (args.bodyFormat === "html") return { body: `${args.body}${block}`, bodyFormat: "html" };
+  return { body: `${plainTextToHtml(args.body)}${block}`, bodyFormat: "html" };
+}
+
+// Compose a quoted reply/forward body, appending the account signature above the
+// quoted original when one is supplied. Centralizes the text→HTML upgrade so the
+// signature renders. Returns the body + the format actually used.
+export function composeQuotedBodyWithSignature(args: {
+  comment: string | undefined;
+  bodyOverride: string | undefined;
+  bodyFormat: "text" | "html";
+  signatureHtml: string | null | undefined;
+  original: { from: string | null; date: string | null; subject: string | null; bodyText: string };
+  mode: "reply" | "forward";
+}): { body: string; bodyFormat: "text" | "html" } {
+  const sig = args.signatureHtml?.trim();
+  if (!sig) {
+    return {
+      body: composeQuotedBody({
+        comment: args.comment,
+        bodyOverride: args.bodyOverride,
+        bodyFormat: args.bodyFormat,
+        original: args.original,
+        mode: args.mode,
+      }),
+      bodyFormat: args.bodyFormat,
+    };
+  }
+  // The user's new content sits above the quote; signature goes right after it.
+  const userTop = args.bodyOverride ?? args.comment ?? "";
+  const topHtml =
+    (args.bodyFormat === "html" ? userTop : plainTextToHtml(userTop)) + signatureBlockHtml(sig);
+  return {
+    body: composeQuotedBody({
+      comment: undefined,
+      bodyOverride: topHtml,
+      bodyFormat: "html",
+      original: args.original,
+      mode: args.mode,
+    }),
+    bodyFormat: "html",
+  };
 }

@@ -23,14 +23,20 @@ import {
 const INLINE_ATTACHMENT_BYTE_LIMIT = 200 * 1024;
 import {
   buildMimeMessage,
-  composeQuotedBody,
+  composeQuotedBodyWithSignature,
   extractAttachments,
   extractBody,
   getHeader,
   parseAddress,
   parseAddressList,
+  withSignature,
   type GmailMessage,
 } from "../google/mime.ts";
+import {
+  getAccountSignature,
+  signatureEnabledByDefault,
+  wantSignature,
+} from "../google/signature.ts";
 
 // ---------- Shared schemas ----------
 
@@ -531,6 +537,21 @@ export function registerMailTools(server: McpServer): void {
 
   // ----- WRITE: compose / send / drafts -----
 
+  const signatureDesc =
+    "Append your Gmail signature (from Gmail Settings → Accounts → 'send mail as') to the message. " +
+    "When omitted, defaults to the GMAIL_MCP_AUTO_SIGNATURE env var (off unless set to 1/true/yes/on). " +
+    "Because Gmail signatures are HTML, a plain-text body is sent as HTML when a signature is appended. " +
+    "IMPORTANT: when this is on, do NOT also write a sign-off/signature into `body` — the account signature is added for you and writing one too would duplicate it.";
+
+  // When the env default is on, every send carries a signature unless the caller
+  // opts out — so the agent must be told up front not to write one into `body`.
+  // A static param description isn't enough: an agent may compose the body
+  // without ever reading the optional `include_signature` arg. So we surface the
+  // warning on the tool description itself, but only when it actually applies.
+  const autoSigNote = signatureEnabledByDefault()
+    ? " SIGNATURE: GMAIL_MCP_AUTO_SIGNATURE is enabled, so your Gmail signature is appended to this message automatically — do NOT write a sign-off/signature into `body` (it would be duplicated). Pass include_signature:false to suppress it for a single call."
+    : "";
+
   const composeShape = {
     to: z.array(recipientSchema).min(1),
     cc: z.array(recipientSchema).optional(),
@@ -539,21 +560,29 @@ export function registerMailTools(server: McpServer): void {
     body: z.string(),
     body_format: z.enum(["text", "html"]).default("text"),
     attachments: z.array(attachmentSchema).optional(),
+    include_signature: z.boolean().optional().describe(signatureDesc),
   } as const;
 
   server.tool(
     "mail_send",
-    "Compose and send an email immediately. Note: Gmail always saves a copy to SENT; the save_to_sent flag is accepted for outlook parity but has no effect.",
+    "Compose and send an email immediately. Note: Gmail always saves a copy to SENT; the save_to_sent flag is accepted for outlook parity but has no effect." +
+      autoSigNote,
     { ...composeShape, save_to_sent: z.boolean().default(true) },
     async (args) => {
       const attachments = await materializeAttachments(args.attachments);
+      const sig = wantSignature(args.include_signature) ? await getAccountSignature() : null;
+      const composed = withSignature({
+        body: args.body,
+        bodyFormat: args.body_format,
+        signatureHtml: sig,
+      });
       const { raw } = buildMimeMessage({
         to: args.to,
         cc: args.cc,
         bcc: args.bcc,
         subject: args.subject,
-        body: args.body,
-        bodyFormat: args.body_format,
+        body: composed.body,
+        bodyFormat: composed.bodyFormat,
         attachments,
       });
       const sent = await googleRequest<{ id: string; threadId: string }>({
@@ -568,17 +597,23 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_create_draft",
-    "Create a draft email (not sent). Returns the draft id.",
+    "Create a draft email (not sent). Returns the draft id." + autoSigNote,
     composeShape,
     async (args) => {
       const attachments = await materializeAttachments(args.attachments);
+      const sig = wantSignature(args.include_signature) ? await getAccountSignature() : null;
+      const composed = withSignature({
+        body: args.body,
+        bodyFormat: args.body_format,
+        signatureHtml: sig,
+      });
       const { raw } = buildMimeMessage({
         to: args.to,
         cc: args.cc,
         bcc: args.bcc,
         subject: args.subject,
-        body: args.body,
-        bodyFormat: args.body_format,
+        body: composed.body,
+        bodyFormat: composed.bodyFormat,
         attachments,
       });
       const created = await googleRequest<{ id: string; message?: { id: string; threadId: string } }>({
@@ -593,7 +628,8 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_update_draft",
-    "Update fields on an existing draft. The draft is fully replaced — pass all the fields you want it to have.",
+    "Update fields on an existing draft. The draft is fully replaced — pass all the fields you want it to have." +
+      autoSigNote,
     {
       id: z.string(),
       to: z.array(recipientSchema).optional(),
@@ -603,16 +639,19 @@ export function registerMailTools(server: McpServer): void {
       body: z.string().optional(),
       body_format: z.enum(["text", "html"]).default("text"),
       attachments: z.array(attachmentSchema).optional(),
+      include_signature: z.boolean().optional(),
     },
-    async ({ id, to, cc, bcc, subject, body, body_format, attachments }) => {
+    async ({ id, to, cc, bcc, subject, body, body_format, attachments, include_signature }) => {
       const materialized = await materializeAttachments(attachments);
+      const sig = wantSignature(include_signature) ? await getAccountSignature() : null;
+      const composed = withSignature({ body: body ?? "", bodyFormat: body_format, signatureHtml: sig });
       const { raw } = buildMimeMessage({
         to: to ?? [{ email: "" }], // Gmail accepts empty fields in a draft; caller should refill
         cc,
         bcc,
         subject: subject ?? "",
-        body: body ?? "",
-        bodyFormat: body_format,
+        body: composed.body,
+        bodyFormat: composed.bodyFormat,
         attachments: materialized,
       });
       await googleRequest({
@@ -642,7 +681,8 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_reply",
-    "Reply to a message. Provide `body` for a fully custom body, or `comment` for a note above the quoted original. Threading headers (In-Reply-To, References, threadId) are set automatically. If the message being replied to was sent by YOU (e.g. continuing a thread you started), recipients are resolved from the original To/Cc minus self, not from the original From. Pass explicit `to`/`cc`/`bcc` to override the heuristic. The response includes a `warnings` array — non-empty when the resolver lands on a suspicious recipient (e.g. yourself).",
+    "Reply to a message. Provide `body` for a fully custom body, or `comment` for a note above the quoted original. Threading headers (In-Reply-To, References, threadId) are set automatically. If the message being replied to was sent by YOU (e.g. continuing a thread you started), recipients are resolved from the original To/Cc minus self, not from the original From. Pass explicit `to`/`cc`/`bcc` to override the heuristic. The response includes a `warnings` array — non-empty when the resolver lands on a suspicious recipient (e.g. yourself)." +
+      autoSigNote,
     {
       id: z.string(),
       body: z.string().optional(),
@@ -652,8 +692,9 @@ export function registerMailTools(server: McpServer): void {
       cc: z.array(recipientSchema).optional().describe("Override the resolved Cc. When set, the heuristic is skipped."),
       bcc: z.array(recipientSchema).optional().describe("Bcc list (no heuristic — always honored as-is)."),
       attachments: z.array(attachmentSchema).optional(),
+      include_signature: z.boolean().optional().describe(signatureDesc),
     },
-    async ({ id, body, body_format, comment, to, cc, bcc, attachments }) => {
+    async ({ id, body, body_format, comment, to, cc, bcc, attachments, include_signature }) => {
       const result = await sendReply({
         id,
         body,
@@ -662,6 +703,7 @@ export function registerMailTools(server: McpServer): void {
         all: false,
         override: { to, cc, bcc },
         attachments,
+        includeSignature: include_signature,
       });
       return ok({
         sent: true,
@@ -674,7 +716,8 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_reply_all",
-    "Reply-all to a message — preserves To/Cc of the original. If the message was sent by YOU, recipients are resolved from the original To/Cc minus self (so the reply goes to the other parties, not back to yourself). Pass explicit `to`/`cc`/`bcc` to override.",
+    "Reply-all to a message — preserves To/Cc of the original. If the message was sent by YOU, recipients are resolved from the original To/Cc minus self (so the reply goes to the other parties, not back to yourself). Pass explicit `to`/`cc`/`bcc` to override." +
+      autoSigNote,
     {
       id: z.string(),
       body: z.string().optional(),
@@ -684,8 +727,9 @@ export function registerMailTools(server: McpServer): void {
       cc: z.array(recipientSchema).optional().describe("Override the resolved Cc. When set, the heuristic is skipped."),
       bcc: z.array(recipientSchema).optional().describe("Bcc list (no heuristic — always honored as-is)."),
       attachments: z.array(attachmentSchema).optional(),
+      include_signature: z.boolean().optional().describe(signatureDesc),
     },
-    async ({ id, body, body_format, comment, to, cc, bcc, attachments }) => {
+    async ({ id, body, body_format, comment, to, cc, bcc, attachments, include_signature }) => {
       const result = await sendReply({
         id,
         body,
@@ -694,6 +738,7 @@ export function registerMailTools(server: McpServer): void {
         all: true,
         override: { to, cc, bcc },
         attachments,
+        includeSignature: include_signature,
       });
       return ok({
         sent: true,
@@ -706,14 +751,15 @@ export function registerMailTools(server: McpServer): void {
 
   server.tool(
     "mail_forward",
-    "Forward a message to new recipients.",
+    "Forward a message to new recipients." + autoSigNote,
     {
       id: z.string(),
       to: z.array(recipientSchema).min(1),
       comment: z.string().optional(),
       attachments: z.array(attachmentSchema).optional(),
+      include_signature: z.boolean().optional().describe(signatureDesc),
     },
-    async ({ id, to, comment, attachments }) => {
+    async ({ id, to, comment, attachments, include_signature }) => {
       const original = await googleRequest<GmailMessage>({
         api: "gmail",
         path: `/users/me/messages/${encodeURIComponent(id)}`,
@@ -724,10 +770,12 @@ export function registerMailTools(server: McpServer): void {
       const origDate = getHeader(original.payload, "Date");
       const fwdSubject = /^fwd?:/i.test(origSubject) ? origSubject : `Fwd: ${origSubject}`;
       const origBody = extractBody(original.payload, "text").content;
-      const composed = composeQuotedBody({
+      const sig = wantSignature(include_signature) ? await getAccountSignature() : null;
+      const composed = composeQuotedBodyWithSignature({
         comment,
         bodyOverride: undefined,
         bodyFormat: "text",
+        signatureHtml: sig,
         original: {
           from: origFrom,
           date: origDate,
@@ -740,8 +788,8 @@ export function registerMailTools(server: McpServer): void {
       const { raw } = buildMimeMessage({
         to,
         subject: fwdSubject,
-        body: composed,
-        bodyFormat: "text",
+        body: composed.body,
+        bodyFormat: composed.bodyFormat,
         attachments: materializedAtts,
         // Forwards don't use In-Reply-To; they start their own thread.
       });
@@ -1062,6 +1110,7 @@ async function sendReply(args: {
   all: boolean;
   override?: { to?: Recipient[]; cc?: Recipient[]; bcc?: Recipient[] };
   attachments?: AttachmentInput[];
+  includeSignature?: boolean;
 }): Promise<{ id: string; threadId: string; warnings: string[] }> {
   const original = await googleRequest<GmailMessage>({
     api: "gmail",
@@ -1105,10 +1154,12 @@ async function sendReply(args: {
     ? `${origReferences} ${origMessageId ?? ""}`.trim()
     : origMessageId ?? undefined;
 
-  const composedBody = composeQuotedBody({
+  const sig = wantSignature(args.includeSignature) ? await getAccountSignature() : null;
+  const composed = composeQuotedBodyWithSignature({
     comment: args.comment,
     bodyOverride: args.body,
     bodyFormat: args.bodyFormat,
+    signatureHtml: sig,
     original: {
       from: origFrom.email ?? null,
       date: origDate,
@@ -1125,8 +1176,8 @@ async function sendReply(args: {
     cc: resolved.cc.length ? resolved.cc : undefined,
     bcc: resolved.bcc && resolved.bcc.length ? resolved.bcc : undefined,
     subject: replySubject,
-    body: composedBody,
-    bodyFormat: args.bodyFormat,
+    body: composed.body,
+    bodyFormat: composed.bodyFormat,
     inReplyTo: origMessageId ?? undefined,
     references,
     attachments: materializedAtts,
