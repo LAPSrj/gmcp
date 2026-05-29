@@ -12,7 +12,7 @@ Modelled on `outlook-mcp`; tool names and argument shapes match wherever the und
 
 **Mail (23 tools):** `mail_list`, `mail_search` (Gmail `q` syntax), `mail_get`, `mail_get_attachment`, `mail_list_labels`, `mail_create_label`, `mail_apply_labels`, `mail_get_thread`, `mail_list_threads`, `mail_send`, `mail_create_draft`, `mail_update_draft`, `mail_send_draft`, `mail_reply`, `mail_reply_all`, `mail_forward`, `mail_move`, `mail_mark_read`, `mail_mark_unread`, `mail_flag`, `mail_delete`, `mail_listen_inbox` (long-poll via history API), `mail_listen_instructions` (returns a Monitor() invocation for a persistent NDJSON event stream — firehose, or filtered to one thread for "watch replies to this email").
 
-**Calendar (7 tools):** `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `calendar_list_event_instances`, `calendar_find_free_slots` (multi-calendar via `freeBusy`), `calendar_create_event` (with Google Meet auto-provision), `calendar_update_event`, `calendar_delete_event`, `calendar_respond`.
+**Calendar (11 tools):** `calendar_list_calendars`, `calendar_list_events`, `calendar_get_event`, `calendar_list_event_instances`, `calendar_find_free_slots` (multi-calendar via `freeBusy`), `calendar_create_event` (with Google Meet auto-provision), `calendar_update_event`, `calendar_delete_event`, `calendar_respond`, `calendar_listen` (long-poll over incremental sync — returns events changed since a `sync_token`: RSVP responses, reschedules, cancellations), `calendar_listen_instructions` (returns a Monitor() invocation for a persistent NDJSON change stream — firehose, or filtered to one event for "notify me only when this meeting changes", with computed per-attendee RSVP deltas).
 
 **Contacts (2 tools, read-only):** `contacts_search` (unions saved + "other" contacts), `contacts_get`.
 
@@ -199,6 +199,7 @@ src/
 ├─ google/
 │  ├─ client.ts         # authed fetch wrapper + paging + 429/5xx retry
 │  ├─ mime.ts           # RFC 822 build/parse for send + get
+│  ├─ calendar-event.ts # shared event shapes + compact projection + change diff
 │  └─ rrule.ts          # pattern/range ↔ RRULE translation
 ├─ lib/
 │  ├─ intervals.ts      # pure: merge busy intervals
@@ -207,11 +208,15 @@ src/
 │  ├─ helpers.ts
 │  ├─ account.ts        # who_am_i, mailbox_get_settings
 │  ├─ auth.ts           # auth_status, auth_login (agent-triggered re-auth)
-│  ├─ mail.ts           # mail_* tools (22)
-│  ├─ calendar.ts       # calendar_* tools (7)
+│  ├─ mail.ts           # mail_* tools (23)
+│  ├─ calendar.ts       # calendar_* tools (11)
 │  └─ contacts.ts       # contacts_* tools (read-only)
 └─ bin/
    └─ auth.ts           # gmail-mcp-auth CLI
+
+scripts/
+├─ gmail-listen.ts      # standalone INBOX listener (history API) for Monitor
+└─ calendar-listen.ts   # standalone calendar change listener (incremental sync) for Monitor
 
 tests/                  # bun:test unit tests for the pure helpers
 ```
@@ -225,6 +230,7 @@ tests/                  # bun:test unit tests for the pure helpers
 - **Third-party meeting URL silently moved to `location`:** intended — Google's `conferenceData` does not accept third-party join URLs. See `PLAN.md` §3 item 5 and the `warnings` entry on the response.
 - **`calendar_respond` rejects `propose_new_time`:** intended — Google Calendar has no equivalent API. Decline with a comment + email the organizer instead.
 - **`mail_listen_inbox` returns `reseeded: true`:** your `since_token` was older than ~7 days (Gmail's history retention). The cursor was reset to "now" and some messages may have been missed in the gap.
+- **`calendar_listen` returns `reseeded: true` (or the `calendar-listen` Monitor emits a `kind:"reseeded"` line):** your `sync_token` expired (Google returned `410 GONE`). The listener re-syncs to rebuild the token; changes during the gap may have been missed. The persistent listener also re-emits the next change to each event as a `baseline` after a process restart, since the in-memory attendee-delta state is lost.
 
 ## License
 

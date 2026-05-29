@@ -1,10 +1,19 @@
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { googleRequest, googleList } from "../google/client.ts";
+import { googleRequest, googleList, GoogleError } from "../google/client.ts";
 import { ok } from "./helpers.ts";
 import { mergeIntervals, type Interval } from "../lib/intervals.ts";
 import { parseHM, inWorkingHours } from "../lib/working-hours.ts";
 import { buildRecurrenceLines, type Recurrence } from "../google/rrule.ts";
+import {
+  compactEvent,
+  type EventDateTime,
+  type CalendarAttendee,
+  type CalendarEvent,
+} from "../google/calendar-event.ts";
 
 // ---------- Schemas ----------
 
@@ -79,105 +88,9 @@ interface CalendarListEntry {
   timeZone?: string;
 }
 
-interface EventDateTime {
-  date?: string; // YYYY-MM-DD (all-day)
-  dateTime?: string; // RFC3339
-  timeZone?: string;
-}
-
-interface ConferenceData {
-  conferenceSolution?: { name?: string; key?: { type?: string } };
-  entryPoints?: { entryPointType?: string; uri?: string }[];
-  createRequest?: { requestId?: string };
-}
-
-interface CalendarAttendee {
-  email?: string;
-  displayName?: string;
-  optional?: boolean;
-  resource?: boolean;
-  organizer?: boolean;
-  self?: boolean;
-  responseStatus?: "needsAction" | "declined" | "tentative" | "accepted";
-  comment?: string;
-}
-
-interface CalendarEvent {
-  id?: string;
-  status?: "confirmed" | "tentative" | "cancelled";
-  summary?: string;
-  description?: string;
-  location?: string;
-  start?: EventDateTime;
-  end?: EventDateTime;
-  attendees?: CalendarAttendee[];
-  organizer?: { email?: string; displayName?: string };
-  recurrence?: string[];
-  recurringEventId?: string;
-  hangoutLink?: string;
-  conferenceData?: ConferenceData;
-  transparency?: "opaque" | "transparent";
-  visibility?: "default" | "public" | "private" | "confidential";
-  reminders?: { useDefault?: boolean; overrides?: { method?: string; minutes?: number }[] };
-  htmlLink?: string;
-  iCalUID?: string;
-  created?: string;
-  updated?: string;
-}
-
 // ---------- Compact shapes ----------
-
-function compactEvent(e: CalendarEvent): Record<string, unknown> {
-  const startDT = e.start?.dateTime ?? e.start?.date ?? null;
-  const endDT = e.end?.dateTime ?? e.end?.date ?? null;
-  const isAllDay = !!e.start?.date && !e.start?.dateTime;
-  const meetUrl =
-    e.hangoutLink ??
-    e.conferenceData?.entryPoints?.find((ep) => ep.entryPointType === "video")?.uri ??
-    null;
-  return {
-    id: e.id,
-    subject: e.summary ?? null,
-    start: e.start ? { date_time: startDT, timezone: e.start.timeZone ?? null } : null,
-    end: e.end ? { date_time: endDT, timezone: e.end?.timeZone ?? null } : null,
-    is_all_day: isAllDay,
-    is_cancelled: e.status === "cancelled",
-    location: e.location ?? null,
-    organizer: e.organizer?.email
-      ? { email: e.organizer.email, name: e.organizer.displayName ?? null }
-      : null,
-    attendees: (e.attendees ?? []).map((a) => ({
-      email: a.email,
-      name: a.displayName ?? null,
-      type: a.resource ? "resource" : a.optional ? "optional" : "required",
-      response:
-        a.responseStatus === "accepted"
-          ? "accepted"
-          : a.responseStatus === "declined"
-            ? "declined"
-            : a.responseStatus === "tentative"
-              ? "tentativelyAccepted"
-              : "notResponded",
-    })),
-    is_online_meeting: !!meetUrl,
-    online_meeting_url: meetUrl,
-    conference_provider: e.conferenceData?.conferenceSolution?.name ?? null,
-    show_as: e.transparency === "transparent" ? "free" : "busy",
-    sensitivity: e.visibility ?? null,
-    reminder_minutes_before:
-      e.reminders?.useDefault === false
-        ? e.reminders.overrides?.find((o) => o.method === "popup")?.minutes ?? null
-        : null,
-    response_status:
-      (e.attendees ?? []).find((a) => a.self)?.responseStatus ?? null,
-    body_preview: (e.description ?? "").slice(0, 200),
-    web_link: e.htmlLink ?? null,
-    series_master_id: e.recurringEventId ?? null,
-    event_type: e.recurringEventId ? "occurrence" : e.recurrence ? "seriesMaster" : "singleInstance",
-    recurrence: e.recurrence ?? null,
-    ical_uid: e.iCalUID ?? null,
-  };
-}
+// CalendarEvent / CalendarAttendee / EventDateTime types and compactEvent live
+// in ../google/calendar-event.ts so the change-listener can share them.
 
 function buildEventDateTime(
   s: string,
@@ -669,4 +582,211 @@ export function registerCalendarTools(server: McpServer): void {
       return ok({ responded: response });
     },
   );
+
+  // ----- LISTEN (long-poll) -----
+
+  server.tool(
+    "calendar_listen",
+    "Wait for calendar events to change (long-poll). Uses Google Calendar's incremental sync (events.list + syncToken) for delta-accurate detection of RSVP/attendee responses, reschedules, and cancellations. Blocks up to `timeout_seconds`; returns as soon as one or more events change, or on timeout. Pass `sync_token` from the previous response to resume seamlessly. With no `sync_token` the call seeds from 'now' and returns immediately (changes:[], seeded:true) so you can start watching future changes. Each returned event is the full current state (same shape as calendar_get_event) — for computed per-attendee deltas ('Alice: notResponded→accepted'), use the persistent Monitor listener via calendar_listen_instructions instead. If your token expires, Google returns 410 and we re-seed (reseeded:true; changes in the gap may be missed).",
+    {
+      sync_token: z
+        .string()
+        .optional()
+        .describe(
+          "next_sync_token from a previous call. If omitted, the call seeds from 'now' and returns immediately with an empty change set plus a token to resume from.",
+        ),
+      event_id: z
+        .string()
+        .optional()
+        .describe(
+          "Restrict to changes for this event id (or, for a recurring series, any of its expanded instances). Matched after the sync — the rest of the calendar's changes are dropped before returning.",
+        ),
+      calendar_id: z.string().optional().describe("Calendar id. Default: primary."),
+      time_min: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 lower bound for the initial seed's full sync (ignored once sync_token is supplied). Default: now. Bounds how far back the first sync reaches.",
+        ),
+      timeout_seconds: z.number().int().min(5).max(300).default(60),
+      poll_interval_seconds: z.number().int().min(5).max(300).default(30),
+      max_results: z.number().int().min(1).max(2500).default(250),
+    },
+    async ({ sync_token, event_id, calendar_id, time_min, timeout_seconds, poll_interval_seconds, max_results }) => {
+      const calId = calendar_id ?? "primary";
+      const path = `/calendars/${encodeURIComponent(calId)}/events`;
+
+      const matches = (e: CalendarEvent): boolean => {
+        if (!event_id) return true;
+        if (e.id === event_id) return true;
+        if (e.recurringEventId === event_id) return true;
+        if (e.id && e.id.startsWith(`${event_id}_`)) return true;
+        return false;
+      };
+
+      // Run a full sync to obtain a fresh syncToken (pages to the last page).
+      const fullSync = async (): Promise<string> => {
+        let pageToken: string | undefined;
+        const timeMin = time_min ?? new Date().toISOString();
+        while (true) {
+          const page = await googleRequest<{ items?: CalendarEvent[]; nextPageToken?: string; nextSyncToken?: string }>({
+            api: "calendar",
+            path,
+            query: {
+              singleEvents: true,
+              showDeleted: true,
+              maxResults: max_results,
+              timeMin,
+              ...(pageToken ? { pageToken } : {}),
+            },
+          });
+          if (page.nextPageToken) {
+            pageToken = page.nextPageToken;
+            continue;
+          }
+          if (!page.nextSyncToken) throw new Error("full sync completed without a nextSyncToken");
+          return page.nextSyncToken;
+        }
+      };
+
+      // No token yet → seed and return immediately.
+      if (!sync_token) {
+        const token = await fullSync();
+        return ok({ changes: [], next_sync_token: token, timed_out: false, seeded: true, reseeded: false });
+      }
+
+      let cursor = sync_token;
+      let reseeded = false;
+      const deadline = Date.now() + timeout_seconds * 1000;
+
+      while (true) {
+        const changed: CalendarEvent[] = [];
+        let pageToken: string | undefined;
+        try {
+          // Drain all pages for this sync round.
+          while (true) {
+            const page = await googleRequest<{ items?: CalendarEvent[]; nextPageToken?: string; nextSyncToken?: string }>({
+              api: "calendar",
+              path,
+              query: { syncToken: cursor, maxResults: max_results, ...(pageToken ? { pageToken } : {}) },
+            });
+            for (const e of page.items ?? []) {
+              if (matches(e)) changed.push(e);
+            }
+            if (page.nextPageToken) {
+              pageToken = page.nextPageToken;
+              continue;
+            }
+            if (page.nextSyncToken) cursor = page.nextSyncToken;
+            break;
+          }
+        } catch (e) {
+          if (e instanceof GoogleError && e.status === 410) {
+            cursor = await fullSync();
+            reseeded = true;
+            return ok({ changes: [], next_sync_token: cursor, timed_out: false, seeded: false, reseeded: true });
+          }
+          throw e;
+        }
+
+        if (changed.length > 0) {
+          return ok({
+            changes: changed.map(compactEvent),
+            next_sync_token: cursor,
+            timed_out: false,
+            seeded: false,
+            reseeded,
+          });
+        }
+        if (Date.now() >= deadline) {
+          return ok({ changes: [], next_sync_token: cursor, timed_out: true, seeded: false, reseeded });
+        }
+        await new Promise((r) => setTimeout(r, poll_interval_seconds * 1000));
+      }
+    },
+  );
+
+  // ----- LISTEN INSTRUCTIONS (Monitor handoff) -----
+
+  server.tool(
+    "calendar_listen_instructions",
+    "Returns the exact Monitor() invocation needed to start a persistent calendar change-listener (long-poll over Google Calendar's incremental sync API). The listener path is resolved from this server's own install location, so the caller does not need to know where the package lives. Pass the returned `monitor` object directly to Claude Code's Monitor tool. Each stdout line is one JSON event: a `change` (with computed `attendee_changes`, `rescheduled`, `cancelled` flags + the full event) or a one-time `baseline` per matching event at startup. Pass `event_id` to watch one event's RSVP/reschedule/cancellation activity — that's the 'notify me only when this meeting changes' pattern. Omit it for a full-calendar firehose. This is the calendar analogue of mail_listen_instructions.",
+    {
+      event_id: z
+        .string()
+        .optional()
+        .describe(
+          "Optional event id. When set, the listener only emits changes to that event (or any expanded instance of a recurring series) and emits a one-time baseline of its current state at startup. Omit for a firehose of all calendar changes (startup is silent in that mode).",
+        ),
+      calendar_id: z.string().optional().describe("Calendar id to watch. Default: primary."),
+      poll_interval_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(300)
+        .optional()
+        .describe("How often the listener calls events.list with the syncToken. Default 30."),
+      time_min: z
+        .string()
+        .optional()
+        .describe(
+          "ISO 8601 lower bound for the initial full sync. Default: now. Bounds how far back the listener's first sync reaches.",
+        ),
+    },
+    async ({ event_id, calendar_id, poll_interval_seconds, time_min }) => {
+      // src/tools/calendar.ts → ../../scripts/calendar-listen.ts
+      const here = dirname(fileURLToPath(import.meta.url));
+      const listenerPath = resolve(here, "..", "..", "scripts", "calendar-listen.ts");
+      const listenerExists = existsSync(listenerPath);
+
+      // Monitor strips env from spawned children; bake the gmail-mcp config env
+      // vars inline so the listener reaches the same OAuth client + token cache
+      // as the server. Tokens stay on disk (~/.config/gmail-mcp/), only path
+      // hints land on the command line.
+      const envParts: string[] = [];
+      const credsFile = process.env.GMAIL_MCP_CREDENTIALS_FILE;
+      const profile = process.env.GMAIL_MCP_PROFILE;
+      const tokenPath = process.env.GMAIL_MCP_TOKEN_PATH;
+      if (credsFile) envParts.push(`GMAIL_MCP_CREDENTIALS_FILE=${shellQuote(credsFile)}`);
+      if (profile) envParts.push(`GMAIL_MCP_PROFILE=${shellQuote(profile)}`);
+      if (tokenPath) envParts.push(`GMAIL_MCP_TOKEN_PATH=${shellQuote(tokenPath)}`);
+
+      const flags: string[] = [];
+      if (event_id) flags.push(`--event-id=${shellQuote(event_id)}`);
+      if (calendar_id) flags.push(`--calendar-id=${shellQuote(calendar_id)}`);
+      if (poll_interval_seconds) flags.push(`--poll=${poll_interval_seconds}`);
+      if (time_min) flags.push(`--time-min=${shellQuote(time_min)}`);
+
+      const command = [...envParts, "bun", shellQuote(listenerPath), ...flags].join(" ");
+
+      return ok({
+        monitor: {
+          command,
+          description: event_id ? `Calendar event ${event_id}` : "Calendar changes",
+          persistent: true,
+          timeout_ms: 3600000,
+        },
+        listener_path: listenerPath,
+        listener_exists: listenerExists,
+        calendar_id: calendar_id ?? "primary",
+        profile: profile ?? null,
+        notes: [
+          "Each stdout line is one JSON event. `kind:\"change\"` carries the full event (same shape as calendar_get_event) plus `attendee_changes` (computed per-attendee response deltas: {email, name, from, to}), `rescheduled`, `cancelled`, and `newly_cancelled` flags. `kind:\"baseline\"` is emitted once per matching event at startup (only when event_id is set) so you immediately see the current RSVP roster.",
+          "Stderr is diagnostics — the startup banner, baseline seed count, reseed events, transient errors.",
+          "Cursor is delta-accurate via Google's incremental sync (events.list syncToken). On reconnect no changes are re-emitted. If the syncToken expires Google returns 410; the listener re-syncs and emits a `kind:\"reseeded\"` line — changes in the gap may have been missed.",
+          event_id
+            ? `Filtering to event_id=${event_id} (and any expanded instances of it). Other calendar changes are dropped.`
+            : "Firehose mode (no event filter). Startup is silent — only changes after startup are emitted. To watch one event instead, call this tool again with `event_id` set.",
+          "The attendee-delta computation is in-memory in the listener process. After a restart the first change to each event re-emits as a baseline (no prior state to diff against) — symmetric with the gmail listener's reseed honesty.",
+          "Env vars (GMAIL_MCP_CREDENTIALS_FILE / GMAIL_MCP_PROFILE / GMAIL_MCP_TOKEN_PATH) are baked into the command line because Monitor spawns children with a stripped env. Tokens themselves stay on disk in ~/.config/gmail-mcp/, not on the command line.",
+        ],
+      });
+    },
+  );
+}
+
+function shellQuote(s: string): string {
+  // Single-quote everything; escape any embedded single quote by closing,
+  // inserting an escaped quote, and reopening. Safe for arbitrary paths.
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
