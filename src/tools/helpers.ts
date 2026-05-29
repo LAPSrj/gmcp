@@ -23,12 +23,15 @@ export function strictifyToolRegistration(server: McpServer): void {
   };
 }
 
-export function ok(data: unknown): CallToolResult {
-  return {
-    content: [
-      { type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) },
-    ],
-  };
+export function ok(data: unknown, notice?: string): CallToolResult {
+  const content: CallToolResult["content"] = [
+    { type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) },
+  ];
+  // An optional advisory appended as a second text block — keeps the data block
+  // at content[0] so existing callers that parse the first block are unaffected.
+  // Used by the poll-detector nudge (see src/lib/poll-detector.ts).
+  if (notice) content.push({ type: "text", text: notice });
+  return { content };
 }
 
 export function err(message: string): CallToolResult {

@@ -231,6 +231,7 @@ tests/                  # bun:test unit tests for the pure helpers
 - **`calendar_respond` rejects `propose_new_time`:** intended — Google Calendar has no equivalent API. Decline with a comment + email the organizer instead.
 - **`mail_listen_inbox` returns `reseeded: true`:** your `since_token` was older than ~7 days (Gmail's history retention). The cursor was reset to "now" and some messages may have been missed in the gap.
 - **`calendar_listen` returns `reseeded: true` (or the `calendar-listen` Monitor emits a `kind:"reseeded"` line):** your `sync_token` expired (Google returned `410 GONE`). The listener re-syncs to rebuild the token; changes during the gap may have been missed. The persistent listener also re-emits the next change to each event as a `baseline` after a process restart, since the in-memory attendee-delta state is lost.
+- **A read tool's response includes a second "It looks like you're re-fetching… use the listener" text block:** not an error. When `mail_list`, `mail_search`, `calendar_get_event`, or `calendar_list_events` is called ~3+ times for the same target at a roughly fixed interval, the server appends a one-line nudge pointing at the change-listener (`mail_listen_instructions` / `calendar_listen_instructions`), which watches server-side and emits only on change. The data is unchanged and stays in the first content block; the nudge keeps appearing while the polling continues.
 
 ## License
 

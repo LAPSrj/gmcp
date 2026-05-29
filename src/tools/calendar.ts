@@ -7,6 +7,7 @@ import { googleRequest, googleList, GoogleError } from "../google/client.ts";
 import { ok } from "./helpers.ts";
 import { mergeIntervals, type Interval } from "../lib/intervals.ts";
 import { parseHM, inWorkingHours } from "../lib/working-hours.ts";
+import { pollNudge } from "../lib/poll-detector.ts";
 import { buildRecurrenceLines, type Recurrence } from "../google/rrule.ts";
 import {
   compactEvent,
@@ -179,7 +180,12 @@ export function registerCalendarTools(server: McpServer): void {
         pageSize: Math.min(top, 2500),
         pageSizeParam: "maxResults",
       });
-      return ok(items.map(compactEvent));
+      const notice = pollNudge(
+        `calendar_list_events:${calId}:${start}:${end}`,
+        Date.now(),
+        `It looks like you're re-running this same date-range query on a timer to watch for changes. For change-only notifications (RSVP responses, reschedules, cancellations) call calendar_listen_instructions${calendar_id ? ` with calendar_id="${calId}"` : ""} and pass the returned command to Monitor — it emits only when events change, instead of you polling.`,
+      );
+      return ok(items.map(compactEvent), notice);
     },
   );
 
@@ -198,10 +204,18 @@ export function registerCalendarTools(server: McpServer): void {
         path: `/calendars/${encodeURIComponent(calId)}/events/${encodeURIComponent(id)}`,
         query: timezone ? { timeZone: timezone } : undefined,
       });
-      return ok({
-        ...compactEvent(e),
-        body: { format: "text", content: e.description ?? "" },
-      });
+      const notice = pollNudge(
+        `calendar_get_event:${calId}:${id}`,
+        Date.now(),
+        `It looks like you're re-fetching this event on a timer to watch for changes. For change-only notifications (RSVP responses, reschedules, cancellations) call calendar_listen_instructions with event_id="${id}"${calendar_id ? `, calendar_id="${calId}"` : ""} and pass the returned command to Monitor — it long-polls server-side and emits only when the event actually changes, instead of you polling.`,
+      );
+      return ok(
+        {
+          ...compactEvent(e),
+          body: { format: "text", content: e.description ?? "" },
+        },
+        notice,
+      );
     },
   );
 

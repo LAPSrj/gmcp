@@ -13,6 +13,7 @@ import {
   base64urlDecodeToBuffer,
   type Recipient,
 } from "./helpers.ts";
+import { pollNudge } from "../lib/poll-detector.ts";
 
 // Inline-base64 size cap on mail_get_attachment. Base64 inflates ~33%, so a
 // 200 KB attachment becomes ~267 KB of agent output — under the harness limit
@@ -265,7 +266,12 @@ export function registerMailTools(server: McpServer): void {
       else if (order_by === "subject") {
         compacts.sort((a, b) => String(a.subject ?? "").localeCompare(String(b.subject ?? "")));
       }
-      return ok(compacts);
+      const notice = pollNudge(
+        `mail_list:${labelId}:${query}`,
+        Date.now(),
+        "It looks like you're re-listing this folder on a timer to watch for new mail. For change-only notifications, call mail_listen_instructions and pass the returned command to Monitor — it long-polls Gmail's history API server-side and emits one line per new arrival (optionally filtered to one thread), instead of you polling. For a single blocking wait, mail_listen_inbox is also cheaper than a poll loop.",
+      );
+      return ok(compacts, notice);
     },
   );
 
@@ -292,7 +298,12 @@ export function registerMailTools(server: McpServer): void {
         pageSizeParam: "maxResults",
       });
       const enriched = await enrichMessages(ids.map((i) => i.id), "metadata");
-      return ok(enriched.map(compactMessageFromHeaders));
+      const notice = pollNudge(
+        `mail_search:${folder ?? ""}:${query}`,
+        Date.now(),
+        "It looks like you're re-running this same search on a timer to watch for new matches. For change-only notifications, call mail_listen_instructions and pass the returned command to Monitor — it long-polls Gmail's history API server-side and emits one line per new inbox arrival (optionally filtered to one thread), instead of you polling.",
+      );
+      return ok(enriched.map(compactMessageFromHeaders), notice);
     },
   );
 
